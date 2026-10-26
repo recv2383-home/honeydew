@@ -40,7 +40,7 @@
 //! which asks the app to show the folder in the system's file manager ([`SettingsTab::take_reveal`]). They show only
 //! where there is such a folder ([`SettingsTab::content`]): on the desktop, not on the web.
 
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use eframe::egui::{
     Align2, Color32, Id, Pos2, Rect, Sense, Shape, Ui, UiBuilder, WidgetInfo, WidgetType, vec2,
@@ -281,6 +281,9 @@ pub struct SettingsTab {
     shown_frame: u64,
     /// How far the list is dragged or wheeled, in points. It is drawn at the whole row nearest to it.
     offset: f32,
+    /// Section headers the user has collapsed. This is UI state, so it is kept for the lifetime of the settings tab
+    /// rather than saved as an application preference.
+    collapsed_sections: HashSet<&'static str>,
     /// `Calibrate` was tapped: the app starts the latency calibration and clears it.
     pub calibrate: bool,
     /// The MIDI input ports the `Input device:` menu lists ([`Self::set_midi_ports`]).
@@ -354,6 +357,23 @@ impl SettingsTab {
             .collect()
     }
 
+    /// The settings rows after removing the contents of collapsed sections. Headers stay visible so they can be
+    /// tapped again to reopen their section.
+    fn visible_rows(&self, rows: &[&'static Row]) -> Vec<&'static Row> {
+        let mut expanded = true;
+        rows.iter()
+            .copied()
+            .filter(|row| {
+                if matches!(row.kind, Kind::Header) {
+                    expanded = !self.collapsed_sections.contains(row.label);
+                    true
+                } else {
+                    expanded
+                }
+            })
+            .collect()
+    }
+
     /// Draws the tab in `page` (the menu panel's width, below its tab row) and applies the user's edits to `settings`;
     /// the app saves and applies what changed.
     pub fn show(&mut self, ui: &mut Ui, cx: &UiCtx, page: Rect, settings: &mut Settings) {
@@ -364,7 +384,7 @@ impl SettingsTab {
         }
         self.shown_frame = frame;
         let m = cx.m;
-        let rows = self.rows();
+        let rows = self.visible_rows(&self.rows());
         let pitch = m.u(ROW_PITCH);
         // The scale note's row takes no room while the scale is not limited.
         let limited = m.scale_limited_to().is_some();
@@ -502,6 +522,25 @@ impl SettingsTab {
                     ui.painter()
                         .rect_filled(line, 0.0, text.gamma_multiply(DIVIDER_ALPHA));
                 }
+                // Section headers are accordion controls: the header remains visible when its contents are
+                // collapsed, and tapping it toggles that section without changing any setting value.
+                let response = ui.interact(r, id.with("header"), Sense::click());
+                if response.clicked() {
+                    if self.collapsed_sections.insert(row.label) {
+                        // The section was just collapsed.
+                    } else {
+                        self.collapsed_sections.remove(row.label);
+                    }
+                }
+                let icon = if self.collapsed_sections.contains(row.label) {
+                    IconId::Collapse
+                } else {
+                    IconId::ChevronDown
+                };
+                // Keep the section title aligned with the existing settings column; the indicator sits at the far
+                // right so it does not change the established text geometry.
+                let icon_rect = r.with_min_x(r.right() - m.u(1.0));
+                draw_icon(ui.painter(), icon_rect, icon, text, 0.65, m);
                 label(ui, r, FontSize::Pt18)
             }
             Kind::Toggle(_) | Kind::FixedToggle(_) | Kind::Latency => {
