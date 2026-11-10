@@ -185,7 +185,7 @@ pub struct Options {
     pub playhead: u64,
     /// How far past `playhead` the playhead is drawn ([`crate::audio_link::AudioLink::playhead_lead`]): the line, the
     /// disc and follow playhead only, never an edit.
-    pub lead: u64,
+    pub lead: i64,
     pub playing: bool,
     /// REC is armed: the playhead disc shows the record icon.
     pub armed: bool,
@@ -413,7 +413,7 @@ impl AutomationEditor {
             loop_beats * f64::from(PPQ),
         );
         let drawn = geom::playhead(
-            (opts.playhead + opts.lead) as f64 - origin as f64,
+            (opts.playhead.saturating_add_signed(opts.lead)) as f64 - origin as f64,
             loop_beats * f64::from(PPQ),
         );
         let mut axes = [
@@ -1447,7 +1447,8 @@ fn region_op(pts: &mut Vec<Point>, op: RegionOp, range: TimeRange, p: u32, loop_
         | RegionOp::Clear
         | RegionOp::Normalize
         | RegionOp::FadeIn
-        | RegionOp::FadeOut => {}
+        | RegionOp::FadeOut
+        | RegionOp::Section => {}
     }
 }
 

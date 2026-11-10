@@ -19,6 +19,7 @@ pub(crate) mod slicer;
 mod slides;
 
 pub use input::{LiveInput, MONITOR_MAX_LAG_FRAMES, RecordTap, TakeStart};
+pub(crate) use midi_sends::{Received, midi_reach, midi_received};
 pub(crate) use prepare::{burned_hits, burned_notes};
 
 use std::sync::Arc;
@@ -682,20 +683,22 @@ impl SongAudioEngine {
     }
 
     /// Mute and Solo are on above 0.5: a channel is out of the mix while its Mute is on, or while another channel's
-    /// Solo is on and its own is not, unless a path of sends or pad targets joins it to a soloed channel. The master is
-    /// never out under a solo.
-    // solo keeps send and pad-target sources audible.
+    /// Solo is on and its own is not, unless it is on a soloed channel's path to the master (sends and pad targets, on
+    /// down): a soloed bus keeps none of its sources (#82). The master is never out under a solo. A channel out of the
+    /// mix takes its pads that play into another channel with it.
     fn sync_mixer_controls(&mut self) {
         let soloed = |controls: &[f32; 4]| controls[3] > 0.5;
         let solo = self.channel_controls.iter().any(soloed);
         for (index, controls) in self.channel_controls.iter().enumerate() {
-            let linked =
-                || (self.routing.linked[index].iter()).any(|&o| soloed(&self.channel_controls[o]));
-            let mut level = controls[0];
-            if controls[2] > 0.5 || (index != 0 && solo && !soloed(controls) && !linked()) {
-                level = 0.0;
-            }
+            let on_path = || {
+                (self.routing.upstream[index].iter()).any(|&o| soloed(&self.channel_controls[o]))
+            };
+            let out = controls[2] > 0.5 || (index != 0 && solo && !soloed(controls) && !on_path());
+            let level = if out { 0.0 } else { controls[0] };
             let _ = self.mixer.set_channel_controls(index, level, controls[1]);
+            if let Some(kit) = &mut self.kits[index] {
+                kit.out = out;
+            }
         }
     }
 
@@ -1790,15 +1793,20 @@ impl SongAudioEngine {
     /// position re-sync at the start, which finds nothing left to release: a note spanning the start stays silent, one
     /// starting on it plays. At a live tempo the transport goes past the end by up to an output frame's worth of
     /// frames, which it carries on from the start; the actions it passes there play next. A transport further past the
-    /// end (a seek, a loop moved before it) starts at the start.
+    /// end (a seek, a loop moved before it) starts at the start. So does one before the loop's start (PR #87: a Play or
+    /// a seek there, a loop drawn after it): whenever the transport is outside the loop, it goes back into it at once.
     fn wrap_at_loop_end(&mut self) {
         let Some((start, end)) = self.wrap_range() else {
             return;
         };
-        if self.frame < end {
+        let before = self.loop_frames.is_some() && self.frame < start;
+        if self.frame < end && !before {
             return;
         }
-        let over = (self.frame - end) as f64 + self.phase;
+        let over = match before {
+            true => f64::INFINITY,
+            false => (self.frame - end) as f64 + self.phase,
+        };
         self.release_held();
         for clips in self.clips.iter_mut().flatten() {
             clips.sampler.all_notes_off();
@@ -2125,6 +2133,36 @@ mod tests {
         assert_eq!(engine.cover_replays, 0);
         engine.seek(u64::from(PPQ));
         assert_eq!(engine.cover_replays, 1);
+    }
+
+    /// A playing transport outside the play loop goes back into it at once, from before its start (Play or a seek
+    /// there, which used to play the gap up to it first) as from past its end; stopped, it stays where it is.
+    #[test]
+    fn a_playing_transport_outside_the_loop_goes_back_to_its_start() {
+        let mut song = Song {
+            tempo_bpm: 120.0,
+            play_loop: Some((2 * PPQ, 4 * PPQ)),
+            ..Song::default()
+        };
+        song.add_channel(ChannelKind::Synth(SynthKind::MiniSynth));
+        let mut engine = SongAudioEngine::new(&song, 48_000.0).unwrap();
+        let start = beat_frame(2.0, 48_000.0, engine.built_bpm).unwrap();
+        let mut output = vec![0.0; 64 * 2];
+        engine.render(&mut output, 2);
+        assert_eq!(engine.frame, 0, "stopped, it stays");
+        engine.play();
+        engine.render(&mut output, 2);
+        assert_eq!(engine.frame, start + 64, "Play before the loop");
+        for (tick, why) in [(PPQ, "a seek before it"), (5 * PPQ, "a seek past it")] {
+            engine.seek(u64::from(tick));
+            engine.render(&mut output, 2);
+            assert_eq!(engine.frame, start + 64, "{why}");
+        }
+        // Inside it, it plays on.
+        engine.seek(u64::from(3 * PPQ));
+        let at = engine.frame;
+        engine.render(&mut output, 2);
+        assert_eq!(engine.frame, at + 64);
     }
 
     /// Issue #33: an instrument that takes the sustain pedal itself (a plugin) gets CC #64 as it moves, a half-pedal

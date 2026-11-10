@@ -219,7 +219,7 @@ pub struct DrumGridView {
     pub covered: bool,
     pub playhead: u64,
     /// How far past `playhead` the playhead is drawn, as [`StepSeqView::lead`].
-    pub lead: u64,
+    pub lead: i64,
     pub playing: bool,
     /// REC is armed: the playhead disc shows the record icon. The host sets it each frame.
     pub armed: bool,
@@ -561,7 +561,7 @@ impl DrumGridView {
                 .clip_rect()
                 .intersect(Rect::everything_right_of(l.column_right())),
         );
-        let drawn = region::playhead_tick(clip, self.playhead + self.lead);
+        let drawn = region::playhead_tick(clip, self.playhead.saturating_add_signed(self.lead));
         let end = loop_beats * BEAT;
         let x = (self.knob).line_x(ui, cx.m, &at, end, axis.x(drawn.unwrap_or(0.0)));
         timeline::playhead_line(&line, l.grid(), x, cx);
@@ -1267,13 +1267,21 @@ impl DrumGridView {
         None
     }
 
-    /// The graph lane's tab for the view `rect`, as the step view's: centred 1.4 U from its left, over the lane's top
-    /// or the view's bottom edge, its icon in `ink`. The host calls it after the drum mixer's strips.
-    pub fn graph_knob(&mut self, ui: &mut Ui, cx: &UiCtx, rect: Rect, ink: egui::Color32) {
+    /// The graph lane's tab for the view `rect`, as the step view's: centred 1.4 U from its left plus the sideways
+    /// `shift` a drag gave it (PR #87, `Settings::graph_tab_shift`), over the lane's top or the view's bottom edge, its
+    /// icon in `ink`. The host calls it after the drum mixer's strips.
+    pub fn graph_knob(
+        &mut self,
+        ui: &mut Ui,
+        cx: &UiCtx,
+        rect: Rect,
+        ink: egui::Color32,
+        shift: &mut f32,
+    ) {
         let m = cx.m;
         let below = (rect, rect.top() + timeline::ruler_h(m));
         let x = rect.left() + m.u(GRAPH_KNOB_X);
-        (self.graph).tab_below(ui, cx, id().with("graph tab"), below, x, ink);
+        (self.graph).tab_below(ui, cx, id().with("graph tab"), below, (x, shift), ink);
     }
 
     /// Closes the popups over the view (the row menu and its prompts, the snap menu, the ruler's region menu and `+`,

@@ -7,7 +7,8 @@
 //! - PROJECT: the tempo steps are song edits; the title, author and link (META@520, @264, @777) are param edits with
 //!   no undo step and no rebuild. The title is the display title, not the file name (`Song::title`, HEAD@8), which
 //!   names the file a quick save writes. The times and the lock come from `META`.
-//!   `Samplerate:` is the running audio output's (`AudioLink::sample_rate`), `-` without one.
+//!   `Samplerate:` is the running audio output's (`AudioLink::sample_rate`), `-` without one; PR #87: its dropdown
+//!   sets the project's own rate (`Song::sample_rate`, a song edit), which the row then shows.
 //!   `Reset`, `Hide` and `Lock metadata forever` each ask once, then set the time spent to 0, the time spent to −1
 //!   (META@256) or the lock (META@776): no unsaved changes (they set no song-changed flag) and no undo steps
 //!   ([`Song::keep_unedited`](crate::song::Song::keep_unedited)).
@@ -29,18 +30,25 @@
 //! - The SONGS file actions act on the library themselves; a failure shows its message, and `Delete permanently`
 //!   asks `Yes` / `No` first. The song's file follows what they move or delete
 //!   ([`ProjectFiles::path_moved`](crate::project_files::ProjectFiles::path_moved)).
+//! - SONGS' preview (#106): a tapped audio file decodes on the sample pickers' worker
+//!   ([`sample_picker::decode_file`]), and the strip's plays go to the preview player, as the pickers' do. It stops
+//!   once SONGS is not shown ([`State::leave`]) and when Play starts ([`State::stop_sample`]). `Send to playlist`
+//!   hands its files to the playlist as files dropped off it ([`crate::ui::file_drag::send`]) and closes the menu.
 //!
 //! [`ProjectFiles::replace`]: crate::project_files::ProjectFiles::replace
 //! [`ProjectFiles::unzip_archive`]: crate::project_files::ProjectFiles::unzip_archive
 //! [`ProjectFiles::content_dir`]: crate::project_files::ProjectFiles::content_dir
 //! [`ProjectFiles::export_theme`]: crate::project_files::ProjectFiles::export_theme
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use eframe::egui;
 
+use super::sample_picker::{self, Decoded};
 use super::{AppCtx, MenuTab, Nav, Overlay, settings_tab};
 use crate::APP_NAME;
+use crate::audio_link::AudioLink;
 use crate::project_files::Replace;
 use crate::project_files::export::quick_render_format;
 use crate::ui::clips::song_end_beats;
@@ -71,6 +79,8 @@ pub struct State {
     library_changes: u64,
     /// The question asked, until its answer comes.
     asked: Option<&'static str>,
+    /// SONGS' previewed file decoding on the worker (#106).
+    decoding: Option<(PathBuf, Receiver<Decoded>)>,
 }
 
 impl State {
@@ -82,6 +92,37 @@ impl State {
     /// The folder open in the SONGS tab, `None` at its root.
     pub fn songs_folder(&self) -> Option<&Path> {
         self.menu.songs_folder()
+    }
+
+    /// SONGS is not shown (the menu closed, or on another tab): its preview stops and goes.
+    pub(super) fn leave(&mut self, audio: &mut AudioLink) {
+        self.decoding = None;
+        self.menu.songs_preview().end();
+        self.send_plays(audio);
+    }
+
+    /// Play started, which stopped the preview player: SONGS' strip stops too.
+    pub(super) fn stop_sample(&mut self) {
+        self.menu.songs_preview().stop();
+    }
+
+    /// A decode that landed goes to SONGS' strip; the strip's plays go to the preview player.
+    fn preview(&mut self, ctx: &egui::Context, audio: &mut AudioLink) {
+        match self.decoding.as_ref().map(|(_, done)| done.try_recv()) {
+            None => {}
+            Some(Err(TryRecvError::Empty)) => ctx.request_repaint(),
+            Some(done) => {
+                let (path, _) = self.decoding.take().expect("decoding");
+                let wave = done.ok().and_then(|d| d.wave);
+                self.menu.songs_preview().decoded(&path, wave);
+            }
+        }
+        self.send_plays(audio);
+    }
+
+    fn send_plays(&mut self, audio: &mut AudioLink) {
+        let preview = self.menu.songs_preview();
+        sample_picker::send_plays(preview.take_plays(), preview.data(), audio);
     }
 
     /// [`MainMenu::show_render`].
@@ -199,8 +240,9 @@ pub fn show(
     info.tempo_bpm = song.tempo_bpm;
     // Where the last clip ends, as the playlist's song end, at the song tempo.
     info.length_secs = song_end_beats(song) * 60.0 / song.tempo_bpm.max(1.0);
-    // `Samplerate:` is the running output's (`-` without one).
+    // `Samplerate:` is the running output's (`-` without one), or the project's own where it has one (PR #87).
     info.sample_rate = app.audio.sample_rate();
+    info.project_rate = app.song.sample_rate;
     // The block reads the shared data, which the app updates; it draws `Detach` or `Attach` by it.
     info.performance.clone_from(perf);
     if *tab == MenuTab::Ai {
@@ -257,6 +299,7 @@ pub fn show(
         meta.info_url.clone_from(&info.link);
         app.param_edited();
     }
+    state.preview(&ctx, app.audio);
     // A renamed song file renames the song (its file-name title, `Song::title`), which is no edit.
     for (from, to) in state.menu.take_moves() {
         app.files.path_moved(app.song, &from, to.as_deref());
@@ -282,6 +325,11 @@ pub fn show(
         MainMenuAction::NewFromTemplate(path) => replace(app, Replace::Template(path)),
         MainMenuAction::SetTempo(bpm) => {
             app.song.set_tempo(bpm);
+            app.song_edited(true);
+        }
+        // PR #87: an edit, whose rebuild reopens the output at the new rate (`AudioLink::replace_song_keeping`).
+        MainMenuAction::SetSampleRate(rate) => {
+            app.song.sample_rate = rate;
             app.song_edited(true);
         }
         MainMenuAction::LockMetadata => nav = Some(ask(&mut state.asked, LOCK_TAG)),
@@ -334,6 +382,15 @@ pub fn show(
             }
         }
         MainMenuAction::ImportTheme => app.files.pick_theme(),
+        MainMenuAction::Preview(path) => {
+            let done = sample_picker::decode_file(app.files, &path);
+            state.decoding = Some((path, done));
+            ctx.request_repaint();
+        }
+        MainMenuAction::SendToPlaylist(files) => {
+            crate::ui::file_drag::send(&ctx, files);
+            return Some(Nav::Close);
+        }
     }
     nav
 }

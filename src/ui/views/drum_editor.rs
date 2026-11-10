@@ -306,7 +306,9 @@ pub fn show(state: &mut State, ui: &mut egui::Ui, app: &mut AppCtx, channel: usi
         let g = &state.grid;
         (g.mixer_w, g.fold.c, g.row_band(), g.graph)
     };
-    let room = crate::ui::split::ribbon_room(editor.right(), app.regions.screen.right(), m);
+    let (screen, shift) = (app.regions.screen.right(), app.settings.editor_ribbon_shift);
+    let strip_left = editor.left() + m.u(step_seq::HEADER_W);
+    let room = crate::ui::split::ribbon_room(editor.right(), screen, shift, strip_left, m);
     if let Some(tabs) = tabs(editor, c, m, room) {
         let mut page = StripPage::ALL
             .iter()
@@ -361,10 +363,15 @@ pub fn show(state: &mut State, ui: &mut egui::Ui, app: &mut AppCtx, channel: usi
             }
         }
         // Over the strips.
+        let shift = &mut app.settings.graph_tab_shift;
         if steps {
-            state.step.graph_knob(&mut ui, &app.cx, editor, color);
+            state
+                .step
+                .graph_knob(&mut ui, &app.cx, editor, color, shift);
         } else {
-            state.grid.graph_knob(&mut ui, &app.cx, editor, color);
+            state
+                .grid
+                .graph_knob(&mut ui, &app.cx, editor, color, shift);
         }
     }
     state.drawn = true;

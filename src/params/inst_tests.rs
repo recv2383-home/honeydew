@@ -51,7 +51,8 @@ const OVERVIEW: [(u16, &str, &str, usize, &[&str]); 8] = [
         149,
         &["OSC", "PAN", "VOL", "CUT", "RES", "PITCH", "FILT", "MISC"],
     ),
-    (52, "SoundFont Player", "SoundFont Player", 6, &[]),
+    // 6, Fine Tune (a Honeydew addition, #90), and the vibrato and Quality (Honeydew additions, #102).
+    (52, "SoundFont Player", "SoundFont Player", 11, &[]),
 ];
 
 fn spec(id: u16) -> &'static ModuleSpec {
@@ -502,19 +503,44 @@ fn instrument_display_samples() {
 }
 
 #[test]
-fn soundfont_player_has_the_six_ui_bound_params() {
-    // Enable, the sliders 1-4, the Envelope toggle 5.
+fn soundfont_player_has_the_eleven_ui_bound_params() {
+    // Enable, the sliders 1-4, the Envelope toggle 5, Fine Tune 6 (a Honeydew addition, #90), and Vib Rate, Depth
+    // and Delay 7-9 and Quality 10 (Honeydew additions, #102).
     let m = spec(52);
     let names: Vec<&str> = m.params.iter().map(|p| p.name).collect();
     assert_eq!(
         names,
         [
-            "Enable", "Attack", "Decay", "Sustain", "Release", "Envelope"
+            "Enable",
+            "Attack",
+            "Decay",
+            "Sustain",
+            "Release",
+            "Envelope",
+            "Fine Tune",
+            "Vib Rate",
+            "Vib Depth",
+            "Vib Delay",
+            "Quality"
         ]
     );
     let defaults: Vec<f32> = m.params.iter().map(|p| p.default).collect();
-    assert_eq!(defaults, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    assert_eq!(
+        defaults,
+        [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0]
+    );
+    // The engine's laws: 10v Hz, 100v cents, 2v s; Quality High above 0.5.
+    assert_eq!(
+        [7, 8, 9].map(|p| text(52, p, 0.5)),
+        ["5.0 Hz", "50 cents", "1.00 s"]
+    );
+    let quality = |v| m.params[10].automation_text(v);
+    assert_eq!([0.0, 0.5, 0.51].map(quality), ["Linear", "Linear", "High"]);
     assert_eq!(m.params[5].kind, ParamKind::Toggle);
+    assert_eq!(
+        [0.0, 0.5, 0.75, 1.0].map(|v| text(52, 6, v)),
+        ["-100 cents", "0 cents", "50 cents", "100 cents"]
+    );
     // Times: t = max(0.005, 10·(0.95v + 0.05)³) s, "%.2f s" from 1 s, else round(1000t) ms.
     for p in [1, 2, 4] {
         let texts = [0.0, 0.3, 0.5, 1.0].map(|v| text(52, p, v));

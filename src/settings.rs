@@ -317,6 +317,33 @@ pub struct Settings {
     /// over a metered network. Off by default: it waits for Wi-Fi.
     #[serde(rename = "soundsOverMobileData")]
     pub sounds_mobile_data: bool,
+    /// `Show performance overlay` (our own key; #89): a small counter of the frames a second, their time and the
+    /// audio's load over every screen (`ui::performance::overlay`). Off by default.
+    #[serde(rename = "performanceOverlay")]
+    pub performance_overlay: bool,
+    /// Where a drag left the performance overlay (our own key): its top-left corner as a share of the room the window
+    /// leaves it, across and down, so that it stays on screen at any size; `None` before any, the bottom-right corner.
+    #[serde(
+        rename = "performanceOverlayAt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub performance_overlay_at: Option<[f32; 2]>,
+    /// The bottom editors' close ribbon's place (our own key; PR #87): the sideways offset a drag gave it, in U from
+    /// where it opens (left of the logo, else in from the editor's right edge), kept over restarts. 0 by default; the
+    /// drag keeps it inside the editor's band ([`crate::ui::split::ribbon`]).
+    #[serde(rename = "editorRibbonShift")]
+    pub editor_ribbon_shift: f32,
+    /// The channel rack's edge tab's place (our own key; PR #87): the offset a drag gave it, in U down the screen's
+    /// right edge from where it opens, kept over restarts. 0 by default; the drag keeps the tab inside the content
+    /// area ([`crate::ui::main_screen::MainScreen::corner_buttons`]).
+    #[serde(rename = "rackTabShift")]
+    pub rack_tab_shift: f32,
+    /// The editors' graph-lane tab's place (our own key; PR #87): the sideways offset a drag gave it, in U from where
+    /// each editor opens it (the piano roll's key column's right edge, the drum editors' 1.4 U in from the left), kept
+    /// over restarts. 0 by default; the drag keeps the tab inside the editor
+    /// ([`crate::ui::graph_lane::GraphLane::tab_below`]).
+    #[serde(rename = "graphTabShift")]
+    pub graph_tab_shift: f32,
 }
 
 /// `Project version size limit:`'s items, in MB.
@@ -387,6 +414,11 @@ impl Default for Settings {
             audio_input: String::new(),
             check_updates: true,
             sounds_mobile_data: false,
+            performance_overlay: false,
+            performance_overlay_at: None,
+            editor_ribbon_shift: 0.0,
+            rack_tab_shift: 0.0,
+            graph_tab_shift: 0.0,
         }
     }
 }
@@ -453,6 +485,16 @@ impl Settings {
         ] {
             if !(h.is_finite() && *h >= 0.0) {
                 *h = default;
+            }
+        }
+        // A hand-moved control's place must be a number of U; a corrupt one opens at its default.
+        for (shift, default) in [
+            (&mut s.editor_ribbon_shift, d.editor_ribbon_shift),
+            (&mut s.rack_tab_shift, d.rack_tab_shift),
+            (&mut s.graph_tab_shift, d.graph_tab_shift),
+        ] {
+            if !shift.is_finite() {
+                *shift = default;
             }
         }
         if !ExportFormat::from_id(s.last_audio_format).is_some_and(ExportFormat::is_audio) {
@@ -826,6 +868,11 @@ mod tests {
             audio_input: "USB".into(),
             check_updates: !d.check_updates,
             sounds_mobile_data: !d.sounds_mobile_data,
+            performance_overlay: !d.performance_overlay,
+            performance_overlay_at: Some([0.25, 0.5]),
+            editor_ribbon_shift: -1.5,
+            rack_tab_shift: 2.25,
+            graph_tab_shift: -3.5,
         }
     }
 
@@ -1031,9 +1078,11 @@ mod tests {
                 "checkForUpdates",
                 "continuousScroll",
                 "demoSongsVersion",
+                "editorRibbonShift",
                 "enableAnimations",
                 "enableInertia",
                 "ghostnotes",
+                "graphTabShift",
                 "gridSize",
                 "importNoticeAccepted",
                 "interruptedWhenLoadingSong",
@@ -1049,11 +1098,13 @@ mod tests {
                 "mtmlevel",
                 "multithreaded",
                 "multitrackrec",
+                "performanceOverlay",
                 "pianoRollPanSnap",
                 "pianoRollVelocitySnap",
                 "pluginFolders",
                 "preferredKbdSizeCells",
                 "projectVersionSizeLimit",
+                "rackTabShift",
                 "recMetronome",
                 "reccount",
                 "recentKbdSizeCells",

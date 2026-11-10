@@ -5,6 +5,7 @@ use eframe::egui::{Event, Id, Rect};
 use super::*;
 use crate::panels::cstm::settings_from_cstm;
 use crate::panels::{self, PanelState};
+use crate::project_files::SAMPLES_FOLDER;
 use crate::song::ModuleInstance;
 use crate::ui::modules_browser::add_module;
 use crate::ui::rack::{Flow, PresetTarget, card_height, content_rect, flow, rack_rect};
@@ -1735,12 +1736,11 @@ fn with_rack_channel(types: &[u16]) -> Rig {
     rig
 }
 
-/// The browser's rows without a search: `Paste` 0, `Rack Preset` 1, `Instrument` 2, SYNTH 3, then 3x Osc 4, Lemon Trio
-/// 5, Citrus 6, DW Sampler 7, Lemon Sampler 8, GMSynth 9, Lemon Drum Sampler 10, MiniSynth 11, Slicer 12, Lemon Slicer
-/// 13, SoundFont Player 14, SuperSaw 15, Transistor Bass 16.
+/// The browser's rows without a search: `Paste` 0, `Rack Preset` 1, `Instrument` 2, SYNTH 3, then 3x Osc 4, DW Sampler
+/// 5, GMSynth 6, MiniSynth 7, Slicer 8, SoundFont Player 9, SuperSaw 10, Transistor Bass 11.
 const THREE_X_OSC: usize = 4;
-const DW_SAMPLER: usize = 7;
-const GM_SYNTH: usize = 9;
+const DW_SAMPLER: usize = 5;
+const GM_SYNTH: usize = 6;
 const INSERT_BELOW: (usize, usize) = (1, 2);
 
 #[test]
@@ -1993,6 +1993,27 @@ fn dw_pair(a: f32, r: f32) -> Vec<u8> {
     [a.to_le_bytes(), r.to_le_bytes()].concat()
 }
 
+/// Opens the DW Sampler's picker on [`DW`] at `My Presets` › `DW Sampler`, where these tests keep its files. With no
+/// `My Samples` it opens in `My Files`, the whole user folder (issue #109), whose first folder is `My Presets`.
+pub(super) fn open_dw_presets(rig: &mut Rig) {
+    rig.click_id(preset_button(DW, instance_id(rig, DW, 0)));
+    picker_row(rig, 0);
+    picker_row(rig, 0);
+}
+
+/// Backs the open picker up to its root, where a DW Sampler's does not open (issue #109).
+pub(super) fn picker_root(rig: &mut Rig) {
+    let back = Id::new(PICKER).with("back");
+    for _ in 0..8 {
+        rig.frame(vec![]);
+        if rig.ctx.read_response(back).is_none() {
+            return;
+        }
+        rig.click_id(back);
+    }
+    panic!("the picker never reached its root");
+}
+
 /// Frames until the pickers' worker is done and its pick applied (the picker stays open).
 pub(super) fn worker_done(rig: &mut Rig) {
     // Joined, not timed: a loaded machine only makes the worker slower.
@@ -2021,8 +2042,7 @@ fn a_picked_dwp_loads_off_the_ui_thread_and_sets_only_attack_and_release() {
     let before = dw_module(&rig);
     let id = before.instance_id;
     let steps = rig.app.history.steps();
-    rig.click_id(preset_button(DW, id));
-    picker_row(&mut rig, 0);
+    open_dw_presets(&mut rig);
     // The program picker lists the `.dwp` beside the module presets.
     picker_row(&mut rig, 0);
     // The worker's result is applied on a later frame, on the UI thread.
@@ -2069,10 +2089,8 @@ fn a_dw_preset_the_program_loader_rejects_loads_its_prms_then_its_path() {
     let bytes = crate::flm::write_preset(&preset).unwrap();
     let files = &mut rig.app.files;
     files.keep_user_file(Path::new("My Presets/DW Sampler/Piano.flmpst"), bytes);
-    let id = instance_id(&rig, DW, 0);
     let pick = |rig: &mut Rig, row: usize| {
-        rig.click_id(preset_button(DW, id));
-        picker_row(rig, 0);
+        open_dw_presets(rig);
         picker_row(rig, row);
         worker_done(rig);
         close_picker(rig);
@@ -2111,8 +2129,7 @@ fn a_file_no_dw_loader_takes_clears_its_zones_and_shows_the_load_error() {
     let files = &mut rig.app.files;
     files.keep_user_file(Path::new("My Presets/DW Sampler/Broken.flmpst"), broken);
     let before = dw_module(&rig);
-    rig.click_id(preset_button(DW, before.instance_id));
-    picker_row(&mut rig, 0);
+    open_dw_presets(&mut rig);
     picker_row(&mut rig, 0);
     worker_done(&mut rig);
     let lines = message(&rig).expect("a message");
@@ -2134,8 +2151,7 @@ pub(super) fn pick_keys(rig: &mut Rig) {
     rig.app
         .files
         .keep_user_file(Path::new("My Presets/DW Sampler/Keys.dwp"), program);
-    rig.click_id(preset_button(DW, instance_id(rig, DW, 0)));
-    picker_row(rig, 0);
+    open_dw_presets(rig);
     picker_row(rig, 0);
 }
 
@@ -2408,8 +2424,7 @@ fn a_picked_programs_samples_decode_on_the_worker_so_the_next_build_reads_nothin
     let hold = crate::ui::views::preset_picker::WORKER_HOLD
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    rig.click_id(preset_button(DW, instance_id(&rig, DW, 0)));
-    picker_row(&mut rig, 0);
+    open_dw_presets(&mut rig);
     picker_row(&mut rig, 0);
     rig.frame(vec![]);
     assert!(
@@ -2428,8 +2443,7 @@ fn a_zone_the_worker_found_missing_is_listed_and_not_read_again_at_the_build() {
     let (user, keys, c4) = keys_on_disk(&mut rig, "missing", "My Presets/DW Sampler");
     // The program is there, its zone file is not.
     std::fs::remove_file(user.0.join("My Presets/DW Sampler/Keys/C4.wav")).unwrap();
-    rig.click_id(preset_button(DW, instance_id(&rig, DW, 0)));
-    picker_row(&mut rig, 0);
+    open_dw_presets(&mut rig);
     picker_row(&mut rig, 0);
     worker_done(&mut rig);
     assert_eq!(dw_module(&rig).params[1], 0.25);
@@ -2467,8 +2481,7 @@ fn a_picked_dw_presets_program_samples_decode_on_the_worker_too() {
         .join("My Presets/DW Sampler");
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("Piano.flmpst"), bytes).unwrap();
-    rig.click_id(preset_button(DW, instance_id(&rig, DW, 0)));
-    picker_row(&mut rig, 0);
+    open_dw_presets(&mut rig);
     picker_row(&mut rig, 0);
     worker_done(&mut rig);
     assert_eq!(dw_module(&rig).file.preset_name, "Piano");
@@ -3003,9 +3016,19 @@ fn the_web_module_pickers_that_list_audio_import_into_the_modules_user_folder() 
         rig.app.add_channel(ChannelKind::Synth(kind), 0);
         let module = &rig.app.song.channels[2].rack.modules[0];
         let (id, type_id) = (module.instance_id, module.type_id);
+        // The DW Sampler's opens in `My Samples` and imports there (issue #109); the others' `My Files` is their
+        // presets folder.
+        let samples = Path::new(SAMPLES_FOLDER);
+        rig.app
+            .files
+            .keep_user_file(&samples.join("Kick.wav"), b"RIFF".to_vec());
         rig.app
             .navigate(Nav::Open(picker(2, PresetTarget::Module(id))));
-        picker_row(&mut rig, 0);
+        let dw = kind == SynthKind::DwSampler;
+        match dw {
+            true => (0..3).for_each(|_| rig.frame(vec![])),
+            false => picker_row(&mut rig, 0),
+        }
         rig.frame(vec![]);
         assert_eq!(rig.color_of("Import").is_some(), import, "{kind:?}");
         if !import {
@@ -3014,7 +3037,10 @@ fn the_web_module_pickers_that_list_audio_import_into_the_modules_user_folder() 
         assert!(rig.color_of("Loop").is_none(), "{kind:?}");
         rig.click_id(Id::new(PICKER).with("import"));
         rig.frame(vec![]);
-        let dir = rig.app.files.presets_dir(type_id).unwrap();
+        let dir = match dw {
+            true => rig.app.files.user_dir().unwrap().join(SAMPLES_FOLDER),
+            false => rig.app.files.presets_dir(type_id).unwrap(),
+        };
         let kept = rig.app.files.read_user_file(&dir.join("Loop.wav"));
         assert_eq!(kept.unwrap(), b"RIFF picked", "{kind:?}");
         assert_eq!(rig.overlays(), [picker(2, PresetTarget::Module(id))]);
@@ -3029,8 +3055,9 @@ fn the_web_module_pickers_that_list_audio_import_into_the_modules_user_folder() 
     let id = rig.app.song.channels[2].rack.modules[0].instance_id;
     rig.app
         .navigate(Nav::Open(picker(2, PresetTarget::Module(id))));
-    picker_row(&mut rig, 0);
-    rig.frame(vec![]);
+    for _ in 0..4 {
+        rig.frame(vec![]);
+    }
     assert!(rig.color_of("Search").is_some() && rig.color_of("Import").is_none());
 }
 
@@ -3068,6 +3095,8 @@ fn our_banks_list_at_each_synths_picker_root_and_a_pick_makes_no_undo_step() {
     use crate::content::{ROOT, factory};
     use crate::ui::main_menu::SongLibrary;
     let mut rig = Rig::with_synth();
+    // The keys under an instrument's picker (#98) take 3 U: a taller window lists Transistor Bass's 10 root rows whole.
+    rig.screen.y = 700.0;
     // About our factory's content, which the rig leaves out.
     rig.app.files.factory = crate::content::factory();
     rig.app

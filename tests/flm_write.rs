@@ -1199,3 +1199,19 @@ fn a_slots_main_flags_and_beat_offset_round_trip() {
         (true, 0.375, 0.7, 3, false)
     );
 }
+
+/// PR #87: a project sample rate goes into an `HDSR` and back; a song that follows the output (0) writes none, as
+/// before.
+#[test]
+fn a_project_sample_rate_round_trips_and_the_outputs_own_writes_nothing() {
+    for rate in honeydew::song::SAMPLE_RATES {
+        let song = honeydew::song::Song {
+            sample_rate: rate,
+            ..Default::default()
+        };
+        assert_eq!(read(&write(&song).unwrap()).unwrap().sample_rate, rate);
+    }
+    let bytes = write(&honeydew::song::Song::default()).unwrap();
+    assert!(!bytes.windows(4).any(|w| w == b"HDSR"));
+    assert_eq!(read(&bytes).unwrap().sample_rate, 0);
+}

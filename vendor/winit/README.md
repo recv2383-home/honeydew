@@ -12,7 +12,12 @@ middle, back and forward buttons as `MouseInput`, as the desktop does; the main 
 `UIApplicationSceneManifest`: `src/platform_impl/ios/scene.rs` registers `WinitSceneDelegate`, attaches windows
 created before scene connection, and leaves apps without a scene manifest on the legacy path. The small hooks are
 in `ios/event_loop.rs`, `ios/window.rs` and `ios/mod.rs`, with the needed UIKit features in `Cargo.toml`. This is
-required to launch builds made with SDK 27 on iPadOS/iOS 27. Other platforms build upstream's code.
+required to launch builds made with SDK 27 on iPadOS/iOS 27. From contributor PR #87: its Android
+config-change path also reports real scale-factor changes only, and reports a nonzero surface size on resume, surface
+creation and rotation. It skips transient zero-size notifications while Android tears down a surface, which can
+otherwise strand the renderer at a zero viewport; it no longer emits a spurious `ScaleFactorChanged` for every
+rotation; and `onDestroy` ends the event loop, as NativeActivity waits for its app thread. Other platforms build
+upstream's code.
 
 To update: copy the new release's `src`, `build.rs` and `LICENSE` here, its `Cargo.toml` without the example and test
 targets and the dev-dependencies, and carry the marked change over.

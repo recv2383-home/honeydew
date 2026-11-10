@@ -475,14 +475,19 @@ fn the_folder_title_is_large_and_level_with_back_at_the_root() {
     );
 }
 
-/// One row size. Every row, folder or song, is in 12 pt; a long name is cut with an end ellipsis and stops before the
+/// A song's row is in 12 pt, a folder's in 14 pt (#79); a long name is cut with an end ellipsis and stops before the
 /// big circles.
 #[test]
-fn every_row_is_in_12_pt_and_a_long_name_is_cut_before_the_big_circles() {
+fn songs_are_in_12_pt_folders_in_14_pt_and_a_long_name_is_cut_before_the_big_circles() {
     let mut rig = Rig::new(Tab::Songs);
     let pt12 = m().font_id(FontSize::Pt12).size;
-    for name in ["Demo songs", "Alpha.flm", "beta.flm"] {
-        assert_eq!(font_size(&rig, name), pt12, "{name}");
+    let pt14 = m().font_id(FontSize::Pt14).size;
+    for (name, size) in [
+        ("Demo songs", pt14),
+        ("Alpha.flm", pt12),
+        ("beta.flm", pt12),
+    ] {
+        assert_eq!(font_size(&rig, name), size, "{name}");
     }
     let mut library = MemoryLibrary::default();
     let long = "A Very Long Song Name That Runs On Far Past The Big Circles Column Tail.flm";
@@ -662,7 +667,11 @@ fn my_tracks_lists_the_renders_and_a_tap_selects_one() {
     rig.frame(vec![]);
     assert_eq!(rig.menu.songs_folder(), Some(tracks.as_path()));
     assert!(rig.has("Mix.wav") && rig.has("Mix.MP3"));
-    assert_eq!(rig.click_text("Mix.wav"), None);
+    // #106: an audio file previews.
+    assert_eq!(
+        rig.click_text("Mix.wav"),
+        Some(MainMenuAction::Preview(tracks.join("Mix.wav")))
+    );
     assert_eq!(
         rig.menu.songs.selection.clone().unwrap(),
         [tracks.join("Mix.wav")]
@@ -767,9 +776,10 @@ fn project_info_shows_the_values_it_is_given() {
     ] {
         assert!(rig.has(text), "{text}");
     }
-    // The values start at 40 % of the content width.
+    // The values start at 40 % of the column's width, the column 2 U in from the 20 U page (#78).
     let content = shell_layout(Rect::from_min_size(Pos2::ZERO, SIZE.into()), &m()).content;
-    let value_x = content.left() + 0.4 * content.width();
+    let column = content.shrink2(vec2(m().u(1.5), 0.0));
+    let value_x = column.left() + 0.4 * column.width();
     assert!((rig.find("13m 2s").left() - value_x).abs() < 1.0);
 }
 

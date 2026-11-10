@@ -411,6 +411,7 @@ impl ProjectFiles {
             }
             FileEvent::Failed(_, detail) => self.fail(failure(export.format), detail),
             FileEvent::Opened(..)
+            | FileEvent::Picked(_)
             | FileEvent::Located(_)
             | FileEvent::Folder(_)
             | FileEvent::Copied(_)

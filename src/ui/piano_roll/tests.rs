@@ -2909,8 +2909,24 @@ mod component {
     #[test]
     fn every_note_menu_item_is_enabled() {
         let items = crate::ui::piano_roll::more_items();
-        assert_eq!(items.len(), 15);
+        assert_eq!(items.len(), 19);
         assert!(items.iter().all(|i| !i.disabled));
+    }
+
+    /// #102, a Honeydew addition: the note menu's `Transpose +1`, `-1`, `+12` and `-12` move the selection, an undo step
+    /// each, and the menu stays open for the next.
+    #[test]
+    fn the_note_menus_transpose_steps_move_the_selection_an_undo_step_each() {
+        let mut rig = Rig::new(vec![n(0, 64.0, 60), n(128, 64.0, 64)]);
+        rig.select(vec![true, false]);
+        rig.tap(rig.text("More...").unwrap());
+        rig.frame(vec![]);
+        rig.tap(rig.text("Transpose +12").unwrap());
+        assert_eq!(keys(&rig), [72, 64]);
+        rig.frame(vec![]);
+        rig.tap(rig.text("Transpose -1").expect("the menu stays open"));
+        assert_eq!(keys(&rig), [71, 64]);
+        assert_eq!(rig.all, [DONE, DONE]);
     }
 
     #[test]
@@ -3087,11 +3103,33 @@ mod component {
         rig.frame(vec![]);
         assert_eq!(rows(&rig), five);
         assert!(rig.all.is_empty());
+        // The key column under Chromatic: every key in range. F5's row (65), 7 rows under C6.
+        let c = theme_by_id(0).colors;
+        let row = |key: u8| {
+            let top = TOP + f32::from(72 - key) * 16.0;
+            Rect::from_x_y_ranges(0.0..=48.0, top..=top + 16.0)
+        };
+        assert!(shows(&rig, row(65), c.white_key.to_color32()));
         rig.tap(rig.text(&five[0]).unwrap());
         assert_eq!(key_lock(&rig), (2, super::stored("Major")));
         assert_eq!(rig.all, [DONE]);
         rig.frame(vec![]);
         assert!(rows(&rig).is_empty(), "the dialog stayed open");
+        // The picked scale shows on the keys as on the keyboard (#77): F is out of D major, F# in.
+        assert!(shows(&rig, row(65), c.white_key_disabled.to_color32()));
+        assert!(shows(&rig, row(66), c.black_key.to_color32()));
+        // With key names on, the scale's keys are named, black ones too; C rows keep their octave label.
+        rig.opts.key_names = true;
+        rig.frame(vec![]);
+        let mut labels = key_labels(&rig);
+        labels.sort_by(|a, b| a.2.top().total_cmp(&b.2.top()));
+        let names: Vec<&str> = labels.iter().map(|l| l.0.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "C6", "B", "A", "G", "F#", "E", "D", "C#", "C5", "B", "A", "G", "F#"
+            ]
+        );
     }
 
     /// The scale-guess result is on the dialog base: screen dim α 0.6, then the floating panel, from the first frame,

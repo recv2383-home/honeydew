@@ -93,11 +93,18 @@
 //! - `Transpose by...` turns the popup into a one-cell offset display: a vertical drag anywhere picks the offset (half
 //!   a U a semitone, up is up, kept to what keeps every note in the key range) and its release applies it; a tap,
 //!   Escape or a click outside cancel.
+//! - A Honeydew addition (#102): `Transpose +1` and `-1` under the first column, `Transpose +12` and `-12` under the
+//!   second, move the notes by that many semitones (kept in the key range as above), and the menu stays open for the
+//!   next step.
 //! - `Humanize` opens the Humanize panel ([`humanize`], issue #29: it used to have no dialog), its seed
 //!   drawn per use from the std hasher's random keys and egui's clock (OS entropy natively; on the web the keys are
 //!   fixed, so the clock varies it). While it is open the roll draws its preview in place of the notes, on the grid
 //!   and in the graph lane, and hides the floating row; its `Apply` writes the preview, re-sorted, deselects and
 //!   re-syncs.
+//! - Contributor feature (PR #87): the transport bar's GENERATE opens the Generate panel ([`generate`],
+//!   [`compose`]): a chord progression and a melody for the clip, in the project's key and scale or the panel's own.
+//!   It previews and applies as the Humanize panel does, its `Apply` writing the clip's notes anew (the clip's own
+//!   melody kept when the melody leads).
 //!
 //! The ruler takes the shared gestures ([`RangeSelect`]) in content ticks on the snap grid (whole ticks with snap off):
 //! a tap sets the song's playhead, and the range is the song's play loop, content tick 0 being song tick
@@ -114,6 +121,8 @@
 //! runs on from the clip's start, unfolded, as the take grows to it; with `Continuous scrolling during playback` on the
 //! view keeps it a quarter in, and with it off the view turns a page whenever it leaves the view.
 
+mod compose;
+mod generate;
 mod humanize;
 pub(crate) mod notes;
 
@@ -134,7 +143,7 @@ use crate::ui::drum_grid::edit::{MARK_GAP, grid_lines, mark_spacing};
 use crate::ui::edit_keys::{self, EditKey};
 use crate::ui::graph_lane::{self, GraphLane, Prop};
 use crate::ui::insert;
-use crate::ui::keyboard::octave_label;
+use crate::ui::keyboard::{key_name, octave_label};
 use crate::ui::popup::{self, PopupItem};
 use crate::ui::region::{self, RegionOp, TimeRange};
 use crate::ui::scroller::{self, Axis, Scroller, X, Y, Zones};
@@ -163,8 +172,8 @@ const LABEL_SHARE: f32 = 0.95;
 const LABEL_PT: [f32; 2] = [6.0, 12.0];
 
 // Colour treatments of theme roles.
-/// Ghost notes: their channel colour at this alpha.
-pub(crate) const GHOST_ALPHA: f32 = 0.35;
+/// Ghost notes: their channel colour at this alpha (0.35 read too bold, #94).
+pub(crate) const GHOST_ALPHA: f32 = 0.2;
 /// Rows that sound or hold a selected note: the channel colour at this alpha.
 const LIT_ALPHA: f32 = 0.1;
 /// The graph lane: its guides' and its (and the grid's) past-the-end overlay's black alpha (0.2 and 0.15).
@@ -235,11 +244,13 @@ pub struct RollOptions {
     pub ghost_notes: bool,
     /// Setting "Set middle C to C4" (the C labels).
     pub middle_c_is_c4: bool,
+    /// Setting "Show key names on keyboard and piano roll": the key column names its in-scale keys too.
+    pub key_names: bool,
     /// The transport's song tick, playing or stopped (every editor's playhead); 0 without an output.
     pub playhead: u64,
     /// How far past `playhead` the playhead is drawn ([`crate::audio_link::AudioLink::playhead_lead`]): the line, the
     /// disc and follow playhead only, never an edit.
-    pub lead: u64,
+    pub lead: i64,
     /// The transport plays.
     pub playing: bool,
     /// REC is armed: the playhead disc shows icon 5 (record).
@@ -291,6 +302,9 @@ pub struct PianoRoll {
     graph_drag: Option<(Vec<Event>, bool)>,
     /// The graph lane's value snap, `Vel`'s and `Pan`'s ([`graph_lane::ROLL_PROPS`]): app settings, off by default.
     pub value_snap: [ValueSnap; 2],
+    /// The graph lane's tab's sideways place, in U from the key column's right edge (PR #87): an app setting, shared
+    /// with the drum editors' tabs (`Settings::graph_tab_shift`); a sideways drag of the tab moves it.
+    pub graph_tab_shift: f32,
     /// The floating buttons over the selection.
     pub(crate) row: clips::FloatingRow,
     /// The selection box's pulse ([`clips::paint_pulse`]) and its handles' press animation.
@@ -382,6 +396,8 @@ enum Menu {
     },
     /// The Humanize panel ([`humanize`]).
     Humanize(humanize::Panel),
+    /// The Generate panel ([`generate`], PR #87): chords and a melody for the clip.
+    Generate(generate::Panel),
 }
 
 /// The scale-guess dialog's items.
@@ -412,6 +428,8 @@ enum MoreOp {
     Slice(Slice),
     TransposeBy,
     SelectAll,
+    /// A Honeydew addition (#102): the targets this many semitones up or down.
+    Transpose(i32),
 }
 
 /// The floating buttons over a selection.
@@ -437,6 +455,7 @@ impl PianoRoll {
             graph: GraphLane::default(),
             graph_drag: None,
             value_snap: [ValueSnap::OFF; 2],
+            graph_tab_shift: 0.0,
             row: clips::FloatingRow::default(),
             pulse: 0.0,
             press: clips::HandlePress::default(),
@@ -659,6 +678,9 @@ impl PianoRoll {
         // ponytail: recomputed every frame the panel shows; keep it by (panel, events) if a huge clip makes that show.
         let preview = match self.menu {
             Some(Menu::Humanize(panel)) => Some(panel.preview(events, &self.selected)),
+            Some(Menu::Generate(panel)) => {
+                Some(panel.preview(events, project_scale(song), f64::from(bpb)))
+            }
             _ => None,
         };
         let events = preview.as_deref().unwrap_or(events);
@@ -726,7 +748,8 @@ impl PianoRoll {
             &ui.painter_at(keys),
             keys,
             &g,
-            opts.middle_c_is_c4,
+            (opts.middle_c_is_c4, opts.key_names),
+            project_scale(song),
             color,
             cx,
         );
@@ -789,7 +812,7 @@ impl PianoRoll {
         }
         // Clipped at the key column's right edge: at beat 0 its left half shows in the t gap. While the knob is
         // dragged, the line and the disc follow the finger.
-        let drawn = self.playhead_at(song, opts.playhead + opts.lead);
+        let drawn = self.playhead_at(song, opts.playhead.saturating_add_signed(opts.lead));
         let x = (self.knob).line_x(ui, m, &at, loop_ticks - 1.0, g.x(drawn.unwrap_or(0.0)));
         let line_painter = ui.painter_at(body.with_min_x(keys.right()));
         line_painter.set(line_slot, timeline::playhead_line_shapes(grid, x, cx));
@@ -802,12 +825,12 @@ impl PianoRoll {
         );
         let snap_center = snap_cell.center();
         self.snap_button(ui, id, snap_cell, color.to_color32(), cx);
-        // The graph lane's tab, centred on the key column's right edge.
-        let tab_x = rect.left() + m.u(KEYS_W);
+        // The graph lane's tab, centred on the key column's right edge (plus the place a drag gave it, PR #87).
+        let tab_x = (rect.left() + m.u(KEYS_W), &mut self.graph_tab_shift);
         let below = (rect, ruler.bottom());
         let ink = color.to_color32();
         (self.graph).tab_below(ui, cx, id.with("graph tab"), below, tab_x, ink);
-        if !matches!(self.menu, Some(Menu::Humanize(_))) {
+        if !matches!(self.menu, Some(Menu::Humanize(_) | Menu::Generate(_))) {
             self.floating_buttons(ui, grid, &g, song, cx, &mut actions);
         }
         self.paste_button(ui, id, grid, &g, song, cx, &mut actions);
@@ -847,6 +870,8 @@ impl PianoRoll {
     /// The roll goes (the view left it, `app::left_view`) with a touch it will not see end ([`Self::end_touch`]); the
     /// key the key column holds and a new note's sound stop now.
     pub(crate) fn hide(&mut self) -> Vec<PianoRollAction> {
+        // An open menu or panel (Generate, #107) is cancelled: it never comes back by itself with the roll.
+        self.menu = None;
         let mut actions = self.end_touch();
         let column = column_keys(&std::mem::take(&mut self.keys_down));
         for key in column.into_iter().chain(self.gate.take().map(|g| g.0)) {
@@ -856,6 +881,14 @@ impl PianoRoll {
             });
         }
         actions
+    }
+
+    /// Opens the `Generate` panel from the transport bar's GENERATE button (PR #87). Its seed comes from the clock, so
+    /// a second tap writes another progression.
+    pub(crate) fn open_generate(&mut self, ctx: &egui::Context) {
+        let seed = RandomState::new().hash_one(ctx.input(|i| i.time).to_bits());
+        self.menu = Some(Menu::Generate(generate::Panel::new(seed)));
+        ctx.request_repaint();
     }
 
     /// The keys the roll sounds stop now, as at [`Self::hide`] (a hidden web page runs no frame, `app::on_hidden`): its
@@ -1020,7 +1053,7 @@ impl PianoRoll {
             },
         ];
         // A take being recorded: where its playhead is, in beats; the time scrolls a view past it.
-        let take = (self.playhead_at(song, opts.playhead + opts.lead))
+        let take = (self.playhead_at(song, opts.playhead.saturating_add_signed(opts.lead)))
             .filter(|_| self.recording)
             .map(|tick| tick / BEAT);
         if let Some(beat) = take {
@@ -1033,7 +1066,8 @@ impl PianoRoll {
             None => {
                 (opts.continuous && opts.playing && loop_ticks / BEAT > axes[X].span()).then(|| {
                     geom::playhead(
-                        (opts.playhead + opts.lead) as f64 - region::clip_origin(clip) as f64,
+                        (opts.playhead.saturating_add_signed(opts.lead)) as f64
+                            - region::clip_origin(clip) as f64,
                         loop_ticks,
                     )
                 })
@@ -2035,6 +2069,20 @@ impl PianoRoll {
                     ctx.request_repaint();
                 }
             }
+            Some(Menu::Generate(mut panel)) => {
+                let hue = song.channels.get(self.channel).map_or(0.0, |c| c.hue);
+                let ink = channel_color(hue, cx.theme).to_color32();
+                let was = panel;
+                let close = generate::show(ctx, cx, id.with("generate"), over, ink, &mut panel);
+                self.menu = close.is_none().then_some(Menu::Generate(panel));
+                if close == Some(generate::Close::Apply) {
+                    self.generate(panel, song, actions);
+                }
+                // As the Humanize panel's: the preview was drawn before the panel changed.
+                if close.is_some() || panel != was {
+                    ctx.request_repaint();
+                }
+            }
             None => {}
         }
     }
@@ -2141,6 +2189,7 @@ impl PianoRoll {
                 self.row.select_all();
             }
             MoreOp::SnapToScale => snap_to_scale(&mut clip.events, &which, root, mask),
+            MoreOp::Transpose(dk) => clip.events = shift_notes(&clip.events, &which, 0.0, dk),
             MoreOp::ToggleSlide => {
                 toggle_slide(&mut clip.events, &which);
                 // S of the remembered note: the first toggled note's new flag.
@@ -2182,6 +2231,29 @@ impl PianoRoll {
         let before = clip.events.clone();
         clip.events = panel.preview(&clip.events, &self.selected);
         self.selected.fill(false);
+        sort(&mut clip.events, &mut self.selected);
+        if clip.events != before {
+            clip.fit_loop(bpb);
+        }
+        actions.push(PianoRollAction::Resync);
+    }
+
+    /// The `Generate` panel's `Apply` (PR #87): its chords and melody into the clip (the clip's own notes kept when the
+    /// melody leads), re-sorted with no selection, one final edit that re-syncs what it changed.
+    fn generate(
+        &mut self,
+        panel: generate::Panel,
+        song: &mut Song,
+        actions: &mut Vec<PianoRollAction>,
+    ) {
+        let bpb = song.time_sig.bar_beats();
+        let scale = project_scale(song);
+        let Some(clip) = self.clip_mut(song) else {
+            return;
+        };
+        let before = clip.events.clone();
+        clip.events = panel.preview(&clip.events, scale, f64::from(bpb));
+        self.selected = vec![false; clip.events.len()];
         sort(&mut clip.events, &mut self.selected);
         if clip.events != before {
             clip.fit_loop(bpb);
@@ -2409,7 +2481,8 @@ fn drag_edit(edit: &Edit, delta: Vec2, g: &Geom, snap: Option<f64>) -> (Vec<Even
     (events, sel)
 }
 
-/// The note menu: two columns, all enabled. `Slice...` is #62.
+/// The note menu: two columns, all enabled. `Slice...` is #62, and the `Transpose` steps (#102) a Honeydew addition,
+/// which keep the menu open for the next.
 fn more_items() -> Vec<PopupItem<MoreOp>> {
     use MoreOp::*;
     let col0 = [
@@ -2420,6 +2493,8 @@ fn more_items() -> Vec<PopupItem<MoreOp>> {
         (DoubleUp, "Double Up", true),
         (DoubleDown, "Double Down", true),
         (ToggleSlide, "Toggle Slide", true),
+        (Transpose(1), "Transpose +1", true),
+        (Transpose(-1), "Transpose -1", true),
     ];
     let col1 = [
         (Length(32), "Set length 1/16", true),
@@ -2430,6 +2505,8 @@ fn more_items() -> Vec<PopupItem<MoreOp>> {
         (SliceBy, "Slice...", true),
         (TransposeBy, "Transpose by...", true),
         (SelectAll, "Select All", true),
+        (Transpose(12), "Transpose +12", true),
+        (Transpose(-12), "Transpose -12", true),
     ];
     [&col0[..], &col1[..]]
         .into_iter()
@@ -2440,6 +2517,7 @@ fn more_items() -> Vec<PopupItem<MoreOp>> {
                 .enumerate()
                 .map(move |(row, &(op, label, enabled))| PopupItem {
                     disabled: !enabled,
+                    keep_open: matches!(op, Transpose(_)),
                     ..PopupItem::new(op, col, row, label)
                 })
         })
@@ -2611,15 +2689,19 @@ fn paint_notes(
     }
 }
 
-/// The key column, vertical. A full-width row per key in `whiteKey` or `blackKey`, and a 1 px `background` α 0.3 line
-/// where two white keys meet (under each C and F). Each C has a channel-colour bar down its left edge (the root marker
-/// colour) and its octave label in `blackKeyDisabled` (as a root white key's label), left-aligned after the bar and
-/// centred on the row.
+/// The key column, vertical, keyed as the keyboard is (#77). A full-width row per
+/// key in `whiteKey` or `blackKey` while the key is in the project scale `(root, mask)` (every key under Chromatic),
+/// else in `whiteKeyDisabled` or `blackKeyDisabled`, and a 1 px `background` α 0.3 line where two white keys meet
+/// (under each C and F). Each C has a channel-colour bar down its left edge (the root marker colour) and its octave
+/// label in `blackKeyDisabled` (as a root white key's label), left-aligned after the bar and centred on the row. With
+/// `key_names` every other in-scale key's name (no octave) sits there too, but no black key's under Chromatic, in the
+/// C labels' `blackKeyDisabled` (the keyboard's `whiteKeyDisabled` on a white key read too faint at row size, #77).
 fn paint_keys(
     painter: &egui::Painter,
     keys: Rect,
     g: &Geom,
-    middle_c_is_c4: bool,
+    (middle_c_is_c4, key_names): (bool, bool),
+    (root, mask): (u8, u16),
     color: Rgba,
     cx: &UiCtx,
 ) {
@@ -2627,11 +2709,17 @@ fn paint_keys(
     painter.rect_filled(keys, 0.0, c.background.to_color32());
     let px = 1.0 / m.ppp();
     let row = |key: u8| Rect::from_x_y_ranges(keys.x_range(), g.y(key)..=g.y(key) + g.row_h);
+    let black = |key: u8| matches!(key % 12, 1 | 3 | 6 | 8 | 10);
     let line = c.background.to_color32().gamma_multiply(0.3);
     let rows = g.key(keys.bottom()).unwrap_or(0)..=g.key(keys.top()).unwrap_or(TOP_KEY);
     for key in rows.clone() {
-        let (r, black) = (row(key), matches!(key % 12, 1 | 3 | 6 | 8 | 10));
-        let fill = if black { c.black_key } else { c.white_key };
+        let fill = match (black(key), in_scale(key, root, mask)) {
+            (false, true) => c.white_key,
+            (false, false) => c.white_key_disabled,
+            (true, true) => c.black_key,
+            (true, false) => c.black_key_disabled,
+        };
+        let r = row(key);
         painter.rect_filled(r, 0.0, fill.to_color32());
         if matches!(key % 12, 0 | 5) {
             painter.rect_filled(r.with_min_y(r.bottom() - px), 0.0, line);
@@ -2640,14 +2728,22 @@ fn paint_keys(
     let bar = (m.u_px() * ROOT_BAR).ceil() * px;
     let pts = LABEL_SHARE * g.row_h / m.u(1.0) * 16.0;
     let font = (pts >= LABEL_PT[0]).then(|| m.font_id_pt(pts.min(LABEL_PT[1])));
-    for key in rows.filter(|k| k % 12 == 0) {
+    let chromatic = mask == SCALE_MASKS[CHROMATIC];
+    for key in rows {
         let r = row(key);
-        painter.rect_filled(r.with_max_x(r.left() + bar), 0.0, color.to_color32());
+        let text = if key % 12 == 0 {
+            painter.rect_filled(r.with_max_x(r.left() + bar), 0.0, color.to_color32());
+            octave_label(key, middle_c_is_c4)
+        } else if key_names && in_scale(key, root, mask) && !(black(key) && chromatic) {
+            key_name(key, false, middle_c_is_c4)
+        } else {
+            continue;
+        };
         if let Some(font) = &font {
             painter.text(
                 pos2(r.left() + bar + m.u(LABEL_GAP), r.center().y),
                 Align2::LEFT_CENTER,
-                octave_label(key, middle_c_is_c4),
+                text,
                 font.clone(),
                 c.black_key_disabled.to_color32(),
             );

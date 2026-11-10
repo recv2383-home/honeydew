@@ -110,6 +110,8 @@ const INPUT_TAG: &str = "audio input";
 const RECORD_TAG: &str = "recording";
 /// What a song that loads with audio files missing shows, and its tag.
 const MISSING_AUDIO: &str = "Some audio files were missing";
+/// The tag of the message that the output fell back from the project's sample rate (PR #87).
+const RATE_TAG: &str = "sample_rate_fallback";
 const MISSING_TAG: &str = "missing audio";
 
 /// The piano roll's key column velocity: MIDI 100, normalised /127 as `NoteOn` takes it (song notes keep bytes, a/255).
@@ -261,6 +263,8 @@ pub struct HoneydewApp {
     midi: midi::Midi,
     /// The song just loaded has audio files missing: [`MISSING_AUDIO`] shows once no other message does.
     missing_audio: bool,
+    /// The (project, output) sample rates the fallback message last showed for ([`Self::warn_sample_rate`]).
+    warned_rate: Option<(u32, u32)>,
     /// The web: the bundled sounds the song just loaded waits for (`app/bundle_wait.rs`).
     song_download: Option<crate::content::web::Ticket>,
     /// The MOD wheel's value (channel param 8, MIDI CC 1) per channel id: the song keeps no value for it (`RPRM` holds
@@ -353,6 +357,7 @@ impl Default for HoneydewApp {
             burn: None,
             midi: Default::default(),
             missing_audio: false,
+            warned_rate: None,
             song_download: None,
             mod_wheel: Default::default(),
             chord_on: Vec::new(),
@@ -1098,6 +1103,40 @@ impl HoneydewApp {
         }
     }
 
+    /// PR #87: the output runs at another rate than the project's (the device fell back): a message says so, once for
+    /// each pair of rates and only while no other message or busy screen shows; the rates matching again re-arm it.
+    /// Nothing for a song that follows the output (0) or without one.
+    fn warn_sample_rate(&mut self) {
+        let (wanted, Some(actual)) = (self.song.sample_rate, self.audio.sample_rate()) else {
+            return;
+        };
+        if wanted == 0 || wanted == actual {
+            self.warned_rate = None;
+            return;
+        }
+        let shown = |o: &Overlay| matches!(o, Overlay::Message { .. } | Overlay::Busy { .. });
+        if self.warned_rate == Some((wanted, actual)) || self.nav.overlays.iter().any(shown) {
+            return;
+        }
+        self.warned_rate = Some((wanted, actual));
+        let hz = |r: u32| crate::ui::main_menu::thousands(r.into());
+        self.navigate(Nav::Open(Overlay::Message {
+            tag: RATE_TAG,
+            lines: vec![
+                format!(
+                    "The audio output cannot run at the project's {} Hz.",
+                    hz(wanted)
+                ),
+                format!(
+                    "It plays at {} Hz instead. Renders use the project's rate.",
+                    hz(actual)
+                ),
+            ],
+            confirm: None,
+            extra: None,
+        }));
+    }
+
     /// Quit: the window's close button asks [`quit_question`], holding the close back; `Yes` closes the window. (The
     /// web has no window to close.)
     fn quit(&mut self, ctx: &egui::Context) {
@@ -1217,6 +1256,7 @@ impl HoneydewApp {
         }
         let cut = &self.cut;
         (self.note_record.held).retain(|h| !cut.contains(&(h.0, h.1)));
+        (self.note_record.sent_held).retain(|h| !cut.contains(&(h.0, h.1)));
     }
 
     /// The keyboard is a piano: the current channel's first lane is an automation lane, or the chosen kind (the
@@ -2030,6 +2070,8 @@ impl HoneydewApp {
         ctx: &egui::Context,
         open: impl FnOnce(&Song, &SampleCache) -> Option<Box<dyn AudioSink>>,
     ) {
+        // #89: the performance overlay's frame time, from here.
+        let started = (self.settings.performance_overlay).then(os_plugkit::time::Instant::now);
         // Before anything reads the input: the latches see the hide as the focus loss it is.
         let hidden = std::mem::take(&mut self.hidden);
         if hidden {
@@ -2147,7 +2189,9 @@ impl HoneydewApp {
         self.recent_held &= ctx.input(|i| i.pointer.any_down());
         let mut shown_bpm = self.song.tempo_bpm;
         if let Some(s) = snapshot.as_ref().filter(|_| shows) {
-            let tick = s.transport_tick + self.audio.playhead_lead();
+            let tick = s
+                .transport_tick
+                .saturating_add_signed(self.audio.playhead_lead());
             self.show_automation(tick, &s.modulated);
             // The BPM button shows the tempo the master's tempo automation has set.
             shown_bpm = self.automated_tempo(tick).unwrap_or(shown_bpm);
@@ -2368,6 +2412,7 @@ impl HoneydewApp {
                                     (view_rect, shown.top()),
                                     screen,
                                     color,
+                                    &mut app.settings.editor_ribbon_shift,
                                     &cx,
                                 ) {
                                     navs.push(Nav::Collapse);
@@ -2406,12 +2451,19 @@ impl HoneydewApp {
                 // The corner buttons go over the rack and under the other overlays.
                 let hue = app.song.channels.get(input.selected).map_or(0.0, |c| c.hue);
                 let ink = crate::theme::channel_color(hue, cx.theme).to_color32();
+                // The rack tab's place, which a drag of it may move (PR #87): out of the settings for the frame, and
+                // back in.
+                let tab_shift = std::cell::Cell::new(app.settings.rack_tab_shift);
                 let corner = |ui: &mut egui::Ui| {
                     let (selected, screen) = ((input.selected, ink), &mut self.main_screen);
-                    screen.corner_buttons(ui, &cx, selected, &regions, &mut actions);
+                    let shift = tab_shift.get();
+                    let at =
+                        screen.corner_buttons(ui, &cx, selected, &regions, &mut actions, shift);
+                    tab_shift.set(at);
                 };
                 let overlay_navs =
                     (self.slots).overlays(&mut self.nav.overlays, ui, &mut app, escape, corner);
+                app.settings.rack_tab_shift = tab_shift.get();
                 #[cfg(test)]
                 match self.test_edit.take() {
                     Some(SongEdit::Replaced) => app.song_replaced(),
@@ -2419,6 +2471,10 @@ impl HoneydewApp {
                     Some(SongEdit::ChannelParam) => app.channel_param_edited(),
                     Some(edit) => app.song_edited(edit == SongEdit::Final),
                     None => {}
+                }
+                // The transport bar's GENERATE (the piano roll only, PR #87) opens the roll's `Generate` panel.
+                if let (true, View::PianoRoll(channel)) = (actions.generate, self.nav.view) {
+                    (self.slots.piano_roll).open_generate(ui.ctx(), app.song, channel);
                 }
                 navs.extend(actions.nav.take());
                 actions.playhead = app.playhead;
@@ -2702,6 +2758,7 @@ impl HoneydewApp {
             self.set_panel_sizes(sizes, &metrics);
         }
         self.project_files(ctx);
+        self.warn_sample_rate();
         // A save took the params moved: the undo steps take them now, or the next edit would count them as unsaved.
         if self.params_moved && !self.files.modified() {
             self.params_moved = false;
@@ -2734,6 +2791,14 @@ impl HoneydewApp {
             m: &metrics,
         };
         crate::ui::tooltip::show(ctx, &cx);
+        if let Some(started) = started {
+            let work = started.elapsed().as_secs_f64();
+            let (p, at) = (
+                &self.slots.performance,
+                &mut self.settings.performance_overlay_at,
+            );
+            crate::ui::performance::overlay(ctx, &cx, self.now, work, p, at);
+        }
         // The song file the next start opens again.
         let file = self.files.song_file().unwrap_or(std::path::Path::new(""));
         if std::path::Path::new(&self.settings.last_song) != file {
@@ -2873,6 +2938,11 @@ mod tests {
     // A start opens the last song again.
     #[cfg(not(target_arch = "wasm32"))]
     mod last_song;
+    // The surface resized between frames (a phone's rotation; PR #87).
+    mod rotation;
+    // SONGS' audio files: preview and `Send to playlist` (#106).
+    #[cfg(not(target_arch = "wasm32"))]
+    mod songs_audio;
 
     impl HoneydewApp {
         /// A Drums channel as the model makes it (the default kit, no picker open), added at the end and selected:
@@ -2911,6 +2981,8 @@ mod tests {
         out: egui::FullOutput,
         /// The next frame brings the window's close request (its close button).
         close_request: bool,
+        /// The screen the frames are laid out on: a rotation resizes it, as the surface is resized on a phone.
+        screen: egui::Vec2,
     }
 
     const U: f32 = 32.0;
@@ -3002,6 +3074,7 @@ mod tests {
                 no_device: false,
                 out: egui::FullOutput::default(),
                 close_request: false,
+                screen: vec2(1170.0, 540.0),
             };
             rig.app.slots.settings_tab = crate::ui::settings_tab::SettingsTab::all_sections_open();
             // Lets egui learn the widget rects before the first press.
@@ -3070,7 +3143,7 @@ mod tests {
         fn frame(&mut self, events: Vec<egui::Event>) {
             self.time += 0.1;
             let mut input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1170.0, 540.0))),
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, self.screen)),
                 events,
                 time: Some(self.time),
                 ..Default::default()

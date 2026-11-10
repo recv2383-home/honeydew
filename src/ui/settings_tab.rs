@@ -256,7 +256,7 @@ const fn row(label: &'static str, kind: Kind) -> Row {
 }
 
 /// Every row of the SETTINGS tab, in order.
-const ROWS: [Row; 52] = {
+const ROWS: [Row; 53] = {
     use Kind::*;
     [
         row("MIDI:", Header),
@@ -322,6 +322,10 @@ const ROWS: [Row; 52] = {
             "Show CPU and RAM meters",
             Toggle(|s| &mut s.hardware_meters),
         ),
+        row(
+            "Show performance overlay",
+            Toggle(|s| &mut s.performance_overlay),
+        ),
         row("Project version size limit:", Dropdown(Choice::VersionSize)),
         row(
             "Enable sharing files with nearby devices",
@@ -380,10 +384,12 @@ enum Menu {
 const RESTORE_QUESTION: &str = "Are you sure you want to restore default settings?";
 const CONFIRM_YES: usize = 1;
 const CONFIRM_NO: usize = 0;
-/// The warning a `Theme:` pick over the theme creator's unsaved edits asks first.
-pub const THEME_WARNING: [&str; 2] = [
+/// The warning a `Theme:` pick over the theme creator's unsaved edits asks first. Its line is in two, so that the popup
+/// fits a phone's width with room each side (#81).
+pub const THEME_WARNING: [&str; 3] = [
     "Warning",
-    "Setting the theme will undo changes made in the theme creator!",
+    "Setting the theme will undo changes",
+    "made in the theme creator!",
 ];
 /// The `Theme:` popup's value of the first user theme ([`SettingsTab::user_themes`]); the built-ins' are their ids.
 const USER_THEMES: usize = 1000;
@@ -1130,12 +1136,17 @@ impl SettingsTab {
         }
     }
 
-    /// Shows the open dropdown's popup and applies the pick.
+    /// Shows the open dropdown's popup and applies the pick. A question is centred on the screen, as the app's other
+    /// questions are, with equal margins each side (#81).
     fn popup(&mut self, ui: &Ui, cx: &UiCtx, s: &mut Settings) {
         let Some((menu, at)) = self.menu else {
             return;
         };
         let ctx = ui.ctx();
+        let at = match menu {
+            Menu::Restore | Menu::ThemeConfirm => ctx.content_rect().center(),
+            _ => at,
+        };
         // `Audio input:` shows once the app has listed the inputs, after the frame that opened it.
         let inputs = match (menu, &self.audio_inputs) {
             (Menu::AudioInput, None) => return ctx.request_repaint(),
@@ -1355,12 +1366,13 @@ fn popup_items(
             ];
         }
         Menu::ThemeConfirm => {
-            let [warning, line] = THEME_WARNING;
+            let [warning, line, rest] = THEME_WARNING;
             return vec![
                 PopupItem::header(0, 0, warning),
                 PopupItem::header(0, 1, line),
-                PopupItem::new(CONFIRM_YES, 0, 2, "OK"),
-                PopupItem::new(CONFIRM_NO, 0, 3, "Cancel"),
+                PopupItem::header(0, 2, rest),
+                PopupItem::new(CONFIRM_YES, 0, 3, "OK"),
+                PopupItem::new(CONFIRM_NO, 0, 4, "Cancel"),
             ];
         }
     };
@@ -1432,6 +1444,7 @@ mod tests {
                 "Continuous scrolling during playback",
                 "Show hidden tracks",
                 "Show CPU and RAM meters",
+                "Show performance overlay",
                 "Project version size limit:",
                 "Enable sharing files with nearby devices",
                 "MCP:",
@@ -1483,7 +1496,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(toggles.len(), 12);
+        assert_eq!(toggles.len(), if cfg!(target_os = "ios") { 14 } else { 13 });
         for (label, field) in &toggles {
             let mut s = Settings::default();
             *field(&mut s) = !*field(&mut s);
@@ -2027,7 +2040,7 @@ mod tests {
             let (u, t) = (m.u(1.0), m.t());
             let column_right = rig.width - 2.0 * u;
             let fills = fills(&rig);
-            assert_eq!(toggles().count(), 17);
+            assert_eq!(toggles().count(), 18);
             for r in toggles() {
                 let at = format!("ppp {ppp} scale {scale}: `{}`", r.label);
                 let control = rig.rect_of(row_id(index(r.label)));
@@ -2516,17 +2529,20 @@ mod tests {
             rig.frame(vec![]);
             assert_eq!(rig.tab.menu.map(|(m, _)| m), Some(Menu::ThemeConfirm));
             assert_eq!(rig.settings.custom_theme, edits);
+            // Centred on the screen (#81), not on the `Theme:` button: its cells are the popup's width.
+            let x = item(rig, 3).x - rig.width / 2.0;
+            assert!(x.abs() < 1.0, "{x}");
         };
         // `Cancel` keeps the edits; `OK` puts Mint in use.
         pick_mint(&mut rig);
-        rig.click(item(&rig, 3));
+        rig.click(item(&rig, 4));
         assert_eq!(
             (rig.settings.theme, &rig.settings.custom_theme),
             (0, &edits)
         );
         assert_eq!(rig.tab.menu, None);
         pick_mint(&mut rig);
-        rig.click(item(&rig, 2));
+        rig.click(item(&rig, 3));
         assert_eq!(
             (rig.settings.theme, rig.settings.custom_theme.as_str()),
             (6, "")

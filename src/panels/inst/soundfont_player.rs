@@ -224,6 +224,11 @@ fn envelope_text(v: f32) -> String {
     if v > 0.5 { "Custom" } else { "Original" }.to_owned()
 }
 
+/// The `Quality` toggle's state text: `Linear` interpolation, or `High` (cubic) above 0.5.
+fn quality_text(v: f32) -> String {
+    if v > 0.5 { "High" } else { "Linear" }.to_owned()
+}
+
 /// A control knob's value text: the CC value, 0…127.
 fn cc_text(v: f32) -> String {
     format!("{}", (127.0 * v).round())
@@ -261,6 +266,16 @@ pub fn panel() -> Option<Panel> {
             v_slider(2300, "Decay").p(2).value_text().enabled(CUSTOM),
             v_slider(2400, "Sustain").p(3).value_text().enabled(CUSTOM),
             v_slider(2500, "Release").p(4).value_text().enabled(CUSTOM),
+            // Issue #90: Fine Tune, a Honeydew addition; it tunes either envelope.
+            v_slider(2600, "Fine Tune").p(6).value_text(),
+            // Honeydew additions (#102): the vibrato and Quality.
+            v_slider(2700, "Vib Rate").p(7).value_text(),
+            v_slider(2800, "Vib Depth").p(8).value_text(),
+            v_slider(2900, "Vib Delay").p(9).value_text(),
+            toggle(3100, "Quality")
+                .p(10)
+                .value_text()
+                .value_fn(quality_text),
         ])
         .h(Size::Flex(1.5))
         .show(PATCH_SHOWN),
@@ -339,26 +354,53 @@ pub const REFERENCE: Reference = Reference {
                     .margins(0.75, 0.75, 0.75, 0.75)
                     .momentary()
                     .slack(1.0, "spec f32 trace"),
-                row(2100, Widget::Toggle, "Envelope", [0.00, 2.59, 3.39, 3.90])
+                // Ten columns: Fine Tune (#90), the vibrato and Quality (#102) are Honeydew additions.
+                row(2100, Widget::Toggle, "Envelope", [0.00, 2.59, 1.69, 3.90])
                     .p(5)
                     .value_text()
                     .value("Original"),
-                row(2200, Widget::VSlider, "Attack", [3.39, 2.59, 3.39, 3.90])
+                row(2200, Widget::VSlider, "Attack", [1.69, 2.59, 1.70, 3.90])
                     .p(1)
                     .value_text()
                     .enabled(CUSTOM),
-                row(2300, Widget::VSlider, "Decay", [6.78, 2.59, 3.39, 3.90])
+                row(2300, Widget::VSlider, "Decay", [3.39, 2.59, 1.69, 3.90])
                     .p(2)
                     .value_text()
                     .enabled(CUSTOM),
-                row(2400, Widget::VSlider, "Sustain", [10.17, 2.59, 3.39, 3.90])
+                row(2400, Widget::VSlider, "Sustain", [5.08, 2.59, 1.70, 3.90])
                     .p(3)
                     .value_text()
                     .enabled(CUSTOM),
-                row(2500, Widget::VSlider, "Release", [13.56, 2.59, 3.40, 3.90])
+                row(2500, Widget::VSlider, "Release", [6.78, 2.59, 1.70, 3.90])
                     .p(4)
                     .value_text()
                     .enabled(CUSTOM),
+                row(2600, Widget::VSlider, "Fine Tune", [8.48, 2.59, 1.69, 3.90])
+                    .p(6)
+                    .value_text(),
+                row(2700, Widget::VSlider, "Vib Rate", [10.17, 2.59, 1.70, 3.90])
+                    .p(7)
+                    .value_text(),
+                row(
+                    2800,
+                    Widget::VSlider,
+                    "Vib Depth",
+                    [11.87, 2.59, 1.69, 3.90],
+                )
+                .p(8)
+                .value_text(),
+                row(
+                    2900,
+                    Widget::VSlider,
+                    "Vib Delay",
+                    [13.56, 2.59, 1.70, 3.90],
+                )
+                .p(9)
+                .value_text(),
+                row(3100, Widget::Toggle, "Quality", [15.26, 2.59, 1.69, 3.90])
+                    .p(10)
+                    .value_text()
+                    .value("Linear"),
             ],
             ..Case::DEFAULT
         },

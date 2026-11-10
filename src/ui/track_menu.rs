@@ -37,15 +37,21 @@ pub enum TrackOp {
     SyncAllSamples,
     /// `Hide track` / `Show track` (Honeydew's own): this track hidden ([`crate::song::Lane::hidden`]) or shown again.
     ToggleHidden,
+    /// `Collapse` / `Expand` (Honeydew's own, #83): this track's row thin ([`crate::song::Lane::collapsed`]) or full.
+    ToggleCollapsed,
+    /// `Collapse all` / `Expand all` (Honeydew's own, #100): every track of the song collapsed or expanded.
+    CollapseAll,
+    ExpandAll,
 }
 
 /// The menu for track `lane` of channel `channel`. The primary track is the channel's lane 0.
 /// - Column 0: `Show Tracks` while the sub-tracks are hidden, else `Hide tracks`, enabled with more than one track;
 ///   `Channel Settings`; `Clone Channel` and `Insert Channel` (not on the master); `Delete Track`, enabled when the
 ///   channel has more than one track of the primary's kind or this track's kind differs from it; Honeydew's
-///   `Hide track`, `Show track` on a hidden track (which shows with Settings `Show hidden tracks`); then
-///   `Delete Channel` (not on the master), last (#68). The master's menu is items 1, 2, 5 and
-///   `Hide track`.
+///   `Hide track`, `Show track` on a hidden track (which shows with Settings `Show hidden tracks`); Honeydew's
+///   `Collapse`, `Expand` on a collapsed track (#83); `Collapse all` while a track of the song is not collapsed and
+///   `Expand all` while one is (#100); then `Delete Channel` (not on the master), last (#68). The master's menu is
+///   items 1, 2, 5, `Hide track` and the collapse items.
 /// - Column 1, generator channels only (not the master, not a send), by the primary track's kind: notes
 ///   `Import MIDI Tracks`, `Save as MIDI`, `Burn Notes to Track`, `Add Track`; audio `Add Track`, `Sync All Samples`; drums `Load Drumset`,
 ///   `Save Drumset`, `Add StepSeq Track`, `Add Notes Track`, `Save as MIDI`. `Sync All Samples` is disabled (see
@@ -64,6 +70,8 @@ pub fn track_menu(song: &Song, channel: usize, lane: usize) -> Vec<PopupItem<Tra
     let primary = primary.kind;
     let master = ch.kind == ChannelKind::Master;
     let of_primary = ch.lanes.iter().filter(|l| l.kind == primary).count();
+    let collapsed =
+        |c: bool| (song.channels.iter()).any(|ch| ch.lanes.iter().any(|l| l.collapsed == c));
     let zip = if ch.zipped {
         "Show Tracks"
     } else {
@@ -83,6 +91,12 @@ pub fn track_menu(song: &Song, channel: usize, lane: usize) -> Vec<PopupItem<Tra
             true => (ToggleHidden, "Show track", true),
             false => (ToggleHidden, "Hide track", true),
         }),
+        Some(match this.collapsed {
+            true => (ToggleCollapsed, "Expand", true),
+            false => (ToggleCollapsed, "Collapse", true),
+        }),
+        collapsed(false).then_some((CollapseAll, "Collapse all", true)),
+        collapsed(true).then_some((ExpandAll, "Expand all", true)),
         (!master).then_some((DeleteChannel, "Delete Channel", true)),
     ];
     let generator = !matches!(ch.kind, ChannelKind::Master | ChannelKind::EffectTrack);
@@ -170,13 +184,15 @@ mod tests {
         song
     }
 
-    const CHANNEL: [(usize, &str, bool); 7] = [
+    const CHANNEL: [(usize, &str, bool); 9] = [
         (0, "Hide tracks", false),
         (0, "Channel Settings", true),
         (0, "Clone Channel", true),
         (0, "Insert Channel", true),
         (0, "Delete Track", false),
         (0, "Hide track", true),
+        (0, "Collapse", true),
+        (0, "Collapse all", true),
         (0, "Delete Channel", true),
     ];
 
@@ -230,11 +246,13 @@ mod tests {
     }
 
     #[test]
-    fn the_master_has_items_1_2_5_and_hide_track_and_a_send_no_column_1() {
+    fn the_master_has_items_1_2_5_hide_track_and_collapse_and_a_send_no_column_1() {
         let song = song();
         assert_eq!(
             menu(&song, 0, 0),
-            [CHANNEL[0], CHANNEL[1], CHANNEL[4], CHANNEL[5]],
+            [
+                CHANNEL[0], CHANNEL[1], CHANNEL[4], CHANNEL[5], CHANNEL[6], CHANNEL[7]
+            ],
             "the master"
         );
         assert_eq!(menu(&song, 4, 0), CHANNEL, "the send");
@@ -313,6 +331,8 @@ mod tests {
                 InsertChannel,
                 DeleteTrack,
                 ToggleHidden,
+                ToggleCollapsed,
+                CollapseAll,
                 DeleteChannel,
                 LoadDrumset,
                 SaveDrumset,

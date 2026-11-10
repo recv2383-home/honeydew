@@ -61,6 +61,10 @@ pub mod instrument_builder;
 pub mod versions;
 // A Lemon plugin's editor full screen (#68).
 pub mod lemon_editor;
+// A song section's dialog (#80).
+pub mod section_settings;
+// `Import MIDI Tracks`' picker (#113).
+pub mod midi_picker;
 
 /// What fills the editor area, between the top of the screen and the transport bar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -175,6 +179,11 @@ pub enum Overlay {
     /// The editor of the built-in Lemon plugin module with instance id `module` on `channel`, full screen (#68, its rack
     /// card's full screen button).
     LemonEditor { channel: usize, module: i32 },
+    /// Song section `section`'s dialog (#80: the playlist ruler's `Section…`, or a tap on its name), with its name field's
+    /// text.
+    SectionSettings { section: usize, name: String },
+    /// `Import MIDI Tracks`' picker (#113) for the channel with this id.
+    MidiPicker(i32),
 }
 
 /// `Link to MIDI CC`'s prompt.
@@ -568,6 +577,8 @@ pub struct Slots {
     pub versions: versions::State,
     /// The full screen Lemon editor's texture and pointer.
     pub lemon_editor: lemon_editor::State,
+    /// `Import MIDI Tracks`' picker.
+    pub midi_picker: midi_picker::State,
 }
 
 impl Slots {
@@ -575,6 +586,7 @@ impl Slots {
     pub fn stop_samples(&mut self) {
         self.sample_picker.stop_sample();
         self.preset_picker.stop_sample();
+        self.main_menu.stop_sample();
     }
 
     /// Points the editor of `key`'s lane at that clip, if it exists: the piano roll keeps its snap and zoom, the drum
@@ -652,7 +664,15 @@ impl Slots {
         let asking =
             (overlays.iter()).any(|o| matches!(o, Overlay::Message { tag: t, .. } if *t == tag));
         let (state, rack) = (&mut self.preset_picker, &mut self.rack);
+        // Issue #98: a card's ◀ or ▶ of the last frame.
+        if let Some(step) = rack.step.take() {
+            preset_picker::step_preset(state, app, step);
+        }
         preset_picker::land_close_grands(state, rack, ui.ctx(), app, asking);
+        // SONGS' preview stops once SONGS is not shown (#106).
+        if !(overlays.iter()).any(|o| matches!(o, Overlay::MainMenu(MenuTab::Songs))) {
+            self.main_menu.leave(app.audio);
+        }
         let top = overlays.len().saturating_sub(1);
         self.rack.full = overlays.iter().find_map(|o| match o {
             Overlay::LemonEditor { channel, module } => Some((*channel, *module)),
@@ -813,6 +833,12 @@ impl Slots {
             // Hidden while what it opened (the sample picker) or a message shows over it.
             Overlay::LemonEditor { channel, module } => {
                 top.then(|| lemon_editor::show(&mut self.lemon_editor, ui, app, *channel, *module))?
+            }
+            Overlay::SectionSettings { section, name } => {
+                section_settings::show(ui, app, *section, name)
+            }
+            Overlay::MidiPicker(channel) => {
+                midi_picker::show(&mut self.midi_picker, ui, app, *channel)
             }
         }
     }
