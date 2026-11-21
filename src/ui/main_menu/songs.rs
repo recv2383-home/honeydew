@@ -9,9 +9,9 @@
 //!
 //! `Back` at `My Songs` goes up to the user folder ([`SongLibrary::user_folder`], #73), titled [`crate::APP_NAME`]: its
 //! folders (`My Songs`, `My Tracks`, `My Samples`, …, the bin, `Original Content`), which are places, never its files,
-//! and nothing is made or pasted there. `Back` stops there. Below it every folder but `My Songs` lists every file, and
-//! a tap on a file that opens no song (a render, a sample) selects it, for its actions. `My Songs` there is the root
-//! again. Every file action stays inside the user folder.
+//! and nothing is made or pasted there. `Back` stops there. Below it every folder but `My Songs` lists every file: a tap
+//! on an audio file previews it (below), and one on any other file that opens no song selects it, for its actions.
+//! `My Songs` there is the root again. Every file action stays inside the user folder.
 //!
 //! Folders come first, then songs and project archives (`.zip`, in the same row style), each group in the chosen order
 //! (`A-Z` by default, case-insensitive). The search bar ([`SearchBar`]) keeps the rows whose name holds the query,
@@ -29,12 +29,14 @@
 //!
 //! A secondary tap (right click) on a row enters select mode, selects the row and opens the ≡ menu at the pointer.
 //!
-//! Preview (#106, a Honeydew addition): a tap that selects an audio file shows the sample pickers' strip
+//! Preview (#106, a Honeydew addition): a tap on an audio file shows the sample pickers' strip
 //! ([`crate::ui::picker_preview::SampleStrip`]) under the list, which shrinks by its height: the file's name, then, once
 //! the app decoded it ([`MainMenuAction::Preview`], [`SongsPreview::decoded`]), its waveform, playing once from the
-//! start on the preview player. A tap that leaves it unselected, a new pick, the folder read again (another folder, a
-//! file action, the menu opening) and leaving SONGS stop it; the strip's own play button and waveform work as in the
-//! pickers. A `.mid` tap still opens it as a song.
+//! start on the preview player. Honeydew change (#123, #130; #106's tap also selected it): the tap selects
+//! nothing, and a second tap on the file stops it; a long press selects it (select mode, below). In select mode a tap
+//! that selects an audio file previews it and one that unselects it stops it. A new pick, the folder read again
+//! (another folder, a file action, the menu opening) and leaving SONGS stop it; the strip's own play button and
+//! waveform work as in the pickers. A `.mid` tap still opens it as a song.
 //!
 //! Touch (#72, after Android reports): a long press on a row ([`gesture::long_press`]) enters select
 //! mode and selects the row, without the menu (egui's own long touch opens none either); taps then add or remove rows. In select mode a bar under the list shows
@@ -180,15 +182,22 @@ impl Sort {
 }
 
 /// The rows to show: the entries whose name holds `query` (ignoring case), folders first, then songs, each group in
-/// `sort` order. Names compare without case, then byte by byte.
+/// `sort` order. Names compare without case, then byte by byte. The library folders (Honeydew change, #144) come after
+/// the user folder's own, in the order added.
 pub fn visible<'a>(entries: &'a [SongEntry], sort: Sort, query: &str) -> Vec<&'a SongEntry> {
     let query = query.to_lowercase();
     let mut rows: Vec<_> = entries
         .iter()
         .filter(|e| e.name.to_lowercase().contains(&query))
         .collect();
+    let roots = super::library::library_folders();
+    let root = |e: &SongEntry| roots.iter().position(|r| *r == e.path);
     rows.sort_by(|a, b| {
-        b.is_folder.cmp(&a.is_folder).then_with(|| match sort {
+        let folders = b
+            .is_folder
+            .cmp(&a.is_folder)
+            .then_with(|| root(a).cmp(&root(b)));
+        folders.then_with(|| match sort {
             Sort::AZ => by_name(a, b),
             Sort::ZA => by_name(b, a),
             Sort::Recent => b.recency.cmp(&a.recency).then_with(|| by_name(a, b)),
@@ -296,13 +305,14 @@ impl SongsPreview {
         self.strip = Some((path.to_owned(), SampleStrip::new(name.into_owned(), None)));
     }
 
-    /// `path`'s decode landed (`wave`; `None`: it does not decode): its strip, if it still shows, plays it from the
-    /// start.
-    pub fn decoded(&mut self, path: &Path, wave: Option<Waveform>) {
+    /// `path`'s decode got further (`wave`, with about `whole` frames still to come) or landed (`whole` `None`; `wave`
+    /// `None`: it does not decode): its strip, if it still shows, plays it, from the start or on from where it is
+    /// ([`SampleStrip::grow`]).
+    pub fn decoded(&mut self, path: &Path, wave: Option<Waveform>, whole: Option<usize>) {
         if let Some((shown, strip)) = &mut self.strip
             && shown == path
         {
-            *strip = SampleStrip::new(std::mem::take(&mut strip.name), wave);
+            strip.grow(wave, whole);
         }
     }
 
@@ -335,6 +345,9 @@ impl SongsPreview {
         Some(self.strip.as_ref()?.1.wave.as_ref()?.data.clone())
     }
 }
+
+/// Where SONGS was left: its folders, the top above `My Songs`, the scroll and the current song.
+type Place = (Vec<SongEntry>, Option<PathBuf>, f32, Option<PathBuf>);
 
 /// The SONGS tab's state.
 #[derive(Default)]
@@ -454,6 +467,21 @@ impl SongsTab {
         // Each showing of the page (the menu opening on it, or its tab coming back) resets the search and moves the
         // focus into the list.
         let frame = ctx.cumulative_frame_nr();
+        // Issue #131: a song load resets the menu, but SONGS opens where it was left (its folders,
+        // scroll and current song), kept in egui's memory while the app runs.
+        let place = id.with("place");
+        if self.drawn.is_none()
+            && let Some(kept) = ctx.data(|d| d.get_temp::<Place>(place))
+        {
+            (self.folders, self.up, self.scroll, self.current) = kept;
+        }
+        let kept: Place = (
+            self.folders.clone(),
+            self.up.clone(),
+            self.scroll,
+            self.current.clone(),
+        );
+        ctx.data_mut(|d| d.insert_temp(place, kept));
         if self.drawn.is_none_or(|f| frame > f + 1) {
             self.search = SearchBar::default();
             focus::enter(&ctx, Id::new(focus::SONGS));
@@ -827,7 +855,8 @@ impl SongsTab {
             .filter(|(e, _)| !is_place(&e.path))
             .map(|(e, _)| e.path.clone())
             .collect();
-        // An audio file the tap selects is previewed; one it unselects stops.
+        // Honeydew change (#123, #130): a tap previews an audio file and a second one stops it, selecting nothing;
+        // in select mode one that selects it previews it and one that unselects it stops.
         let tapped = (clicked.as_ref())
             .filter(|(e, ..)| !e.is_folder && is_audio(&e.path))
             .map(|(e, ..)| e.path.clone());
@@ -855,18 +884,22 @@ impl SongsTab {
                     self.search.end();
                 }
             } else if !crate::project_files::is_project(&entry.path) {
-                // A render opens no song: a tap selects it, for its actions.
-                self.selection = Some(vec![entry.path]);
+                // Any other file that opens no song: a tap selects it, for its actions.
+                if !is_audio(&entry.path) {
+                    self.selection = Some(vec![entry.path]);
+                }
             } else {
                 self.current = Some(entry.path.clone());
                 action = Some(MainMenuAction::Open(entry.path));
             }
         }
         if let Some(path) = tapped {
-            if (self.selection.as_ref()).is_some_and(|s| s.contains(&path)) {
+            let shown = self.preview.strip.as_ref().is_some_and(|(p, _)| *p == path);
+            let play = (self.selection.as_ref()).map_or(!shown, |s| s.contains(&path));
+            if play {
                 self.preview.pick(&path);
                 action = Some(MainMenuAction::Preview(path));
-            } else if self.preview.strip.as_ref().is_some_and(|(p, _)| *p == path) {
+            } else if shown {
                 self.preview.end();
             }
         }
@@ -1001,7 +1034,11 @@ impl SongsTab {
             locked_folder: (self.open_dir(library)).is_some_and(|d| library.read_only(&d))
                 || self.up.is_some() && self.folders.is_empty(),
             locked_picked: picked.iter().any(|e| library.read_only(&e.path)),
-            send: cfg!(mobile).then(|| picked.iter().all(|e| !e.is_folder)),
+            // A library folder's file has no document to share (Honeydew change, #144).
+            send: cfg!(mobile).then(|| {
+                let shared = |e: &SongEntry| super::library::library_root_of(&e.path).is_none();
+                picked.iter().all(|e| !e.is_folder && shared(e))
+            }),
         }
     }
 

@@ -10,28 +10,46 @@
 //! kit's pads instead, across the row in pad order (#88).
 //!
 //! **Keys** (#98, a Honeydew addition). The app's keyboard ([`keyboard::keyboard_at`]),
-//! [`KEYS_H`] tall across the bottom of an instrument's picker, its 2 U white keys round middle C, playing the picker's
-//! channel as the audition strip does: velocity 1, every key a finger holds held, a tap for the keyboard's tap gate.
+//! [`KEYS_H`] tall across the bottom of an instrument's picker, its [`WHITE_W`] white keys round middle C, playing the
+//! picker's channel as the audition strip does: velocity 1, every key a finger holds held, a tap for the keyboard's tap
+//! gate. They take the panel's colours, not the keyboard panel's ([`faint`]), and SETTINGS `Keyboard in pickers`
+//! turns them off. They light the channel's notes as the keyboard panel's keys do: those held elsewhere (the keyboard
+//! panel, typed, MIDI) and those sounding (playback, previews). They pan and zoom as the keyboard panel's do, on the
+//! keys themselves: a touch holds its key while calm (no glissando), and once it leaves the calm zone sideways it pans
+//! them, its key let go, and flings; two fingers whose spread leaves it pinch them, their keys let go; the wheel (or a
+//! trackpad pinch) over them zooms. Their view starts with middle C in the middle and is kept while the app runs
+//! ([`VIEW`]).
 //!
 //! **Sample strip.** 1.75 U at the bottom of the panel, `menuFill`: the play button (icon 3, 1.2 U, centred in a 2 U
-//! column), the waveform (from x + 2 U, max(W − 2.4 U, 0) wide, 1 U tall, `text` at 0.85), and under it the sample's
-//! name and its progress in a 5 : 1 width. It plays the pick once from the start; the play button (or the play key)
-//! stops or plays from the start, a touch on the waveform stops and its release plays from there. The waveform sits
-//! 0.125 U below the strip's top, the labels fill the rest; the progress is the position as m:ss (0:00 while stopped).
-//! The waveform is one smooth band of the file's peaks, scaled to its loudest ([`envelope`], #108):
-//! the audio editor's min/max columns showed a low note's single cycles, hairy and thin.
+//! column; ■ while it plays, #124), the waveform (from x + 2 U, max(W − 2.4 U, 0) wide, 1 U tall, `text` at 0.85), and
+//! under it the sample's name and its progress in a 5 : 1 width. It plays the pick once from the start; the play button
+//! (or the play key) stops or plays from the start, a touch on the waveform stops and its release plays from there. The
+//! waveform sits 0.125 U below the strip's top, the labels fill the rest; the progress is the position as m:ss (0:00
+//! while stopped). The waveform is the playlist's audio clips' of the whole file
+//! ([`crate::ui::clips::wave_mesh`]: each channel's min/max a device pixel a column, stereo in halves, at full scale;
+//! #124, where #108 drew one smoothed band of held peaks). While it plays, the editors' playhead line marks the
+//! position on it (#123).
+//!
+//! A big file plays as it decodes (a Honeydew addition, #131, #153): the strip starts on its first part and goes on in
+//! each longer one from where it is ([`SampleStrip::grow`]), its waveform filling in across about the whole's length.
+//! A touch past what is known plays from the known end; at that end the player waits for more, and so does the clock.
 
-use eframe::egui::{Align2, Color32, Id, Mesh, Painter, Rect, Sense, Ui, pos2, vec2};
+use std::sync::Arc;
+
+use eframe::egui::{Align2, Color32, Id, Painter, Pos2, Rect, Sense, Ui, pos2, vec2};
 
 use crate::icons::{IconId, draw_icon};
-use crate::metrics::FontSize;
+use crate::metrics::{FontSize, Metrics};
 use crate::sample_cache::Waveform;
 use crate::settings::Settings;
-use crate::ui::audio_editor::{add_column, pixel_columns, wave_rows};
+use crate::theme::{Rgba, Theme};
+use crate::ui::audio_editor::{Wave, pixel_columns, wave_rows};
+use crate::ui::clips::wave_mesh;
+use crate::ui::gesture::CALM_U;
 use crate::ui::keyboard::{self, KeyInput, KeyView, Piano};
+use crate::ui::panel_resize::{PanelGrab, Zone};
 use crate::ui::widgets::truncated;
-use crate::ui::{Finger, UiCtx, fingers};
-use honeydew_audio::sample_edit::peaks;
+use crate::ui::{Finger, UiCtx, fingers, focus_lost};
 
 /// The lowest and highest notes the strip plays, across the row (24 to 84).
 const LOW: f32 = 24.0;
@@ -163,12 +181,45 @@ impl Audition {
     }
 }
 
-/// The keys' height, in U: under a phone's landscape header the list keeps most of its rows.
-pub const KEYS_H: f32 = 3.0;
+/// The keys' height and a white key's width, in U (smaller than the keyboard panel's 2 U keys, so the list
+/// keeps its rows and more octaves show, still a finger wide).
+pub const KEYS_H: f32 = 2.0;
+pub const WHITE_W: f32 = 1.0;
+/// The egui memory id of the keys' scroll and zoom ([`KeyView`]), which every picker shares while the app runs.
+pub const VIEW: &str = "picker keys view";
+/// How far the keys' colours go from the panel's `menuFill` ([`faint`]): white keys toward `whiteKey`, black keys and
+/// the separators toward `background`, the labels toward `text`, a held key toward the channel's colour.
+const WHITE_MIX: f32 = 0.08;
+const BLACK_MIX: f32 = 0.3;
+const SEP_MIX: f32 = 0.2;
+const LABEL_MIX: f32 = 0.35;
+const HELD_MIX: f32 = 0.4;
+
+/// `a` moved `t` of the way to `b`.
+fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    let at = |x: f32, y: f32| x + (y - x) * t;
+    Rgba::rgb(at(a.r, b.r), at(a.g, b.g), at(a.b, b.b))
+}
+
+/// `theme` for the picker's keys: they sit in the panel (`menuFill`), white keys a little lighter, black keys a little
+/// darker, thin separators (`background`) between, and every label (`whiteKeyDisabled`, `blackKeyDisabled`: no key is
+/// out of range here) in dim `text`.
+fn faint(theme: &Theme) -> Theme {
+    let mut faint = theme.clone();
+    let (c, f) = (&theme.colors, &mut faint.colors);
+    let panel = c.menu_fill;
+    f.control_fill = panel;
+    f.white_key = mix(panel, c.white_key, WHITE_MIX);
+    f.black_key = mix(panel, c.background, BLACK_MIX);
+    f.background = mix(panel, c.background, SEP_MIX);
+    f.white_key_disabled = mix(panel, c.text, LABEL_MIX);
+    f.black_key_disabled = f.white_key_disabled;
+    faint
+}
 
 /// The keys at the bottom of an instrument's picker (see the module docs).
 pub struct KeyStrip {
-    /// The channel's colour, which a pressed key and a root's marker take.
+    /// The channel's colour, which a pressed key and a root's marker take, [`HELD_MIX`] of the way from the panel's.
     pub ink: Color32,
     /// What the keys' labels follow (`Show key names`, `Set middle C to C4`).
     pub settings: Settings,
@@ -177,6 +228,15 @@ pub struct KeyStrip {
     /// The keys last tapped, sounding until the gate ends (egui seconds).
     taps: (Vec<u8>, f64),
     sounds: Vec<Sound>,
+    /// The channel's notes held elsewhere and those sounding at its input ([`KeyInput::notes`],
+    /// [`KeyInput::sounding`]), which the caller sets each frame.
+    pub lit: (u128, u128),
+    /// The keyboard panel's scroll zone, over the keys: the pan, its fling and the wheel's zoom.
+    grab: PanelGrab,
+    /// The fingers on the keys, where they are now; and the first two's spread as the second went down, and whether it
+    /// has left the calm zone since (a pinch).
+    spots: Vec<(u64, Pos2)>,
+    pinch: Option<(f32, bool)>,
 }
 
 impl KeyStrip {
@@ -187,7 +247,37 @@ impl KeyStrip {
             on: Vec::new(),
             taps: (Vec::new(), 0.0),
             sounds: Vec::new(),
+            lit: (0, 0),
+            grab: PanelGrab::default(),
+            spots: Vec::new(),
+            pinch: None,
         }
+    }
+
+    /// This frame's fingers on the keys `id`: whether two of them pinch, their spread changed by more than the calm
+    /// distance since the second went down (two fingers held still play a chord).
+    fn pinch(&mut self, ui: &Ui, id: Id, m: &Metrics) -> bool {
+        for step in fingers(ui, id) {
+            match step {
+                Finger::Down(f, p) => self.spots.push((f, p)),
+                Finger::Move(f, p) => (self.spots.iter_mut())
+                    .filter(|s| s.0 == f)
+                    .for_each(|s| s.1 = p),
+                Finger::Up(f, _) => self.spots.retain(|s| s.0 != f),
+            }
+        }
+        // A lift the keys never saw (a focus loss, or a frame without them).
+        if ui.input(|i| focus_lost(i) || !i.pointer.any_down() && !i.any_touches()) {
+            self.spots.clear();
+        }
+        self.pinch = match self.spots[..] {
+            [(_, a), (_, b), ..] => {
+                let (from, on) = self.pinch.unwrap_or((a.distance(b), false));
+                Some((from, on || (a.distance(b) - from).abs() > m.u(CALM_U)))
+            }
+            _ => None,
+        };
+        self.pinch.is_some_and(|p| p.1)
     }
 
     /// Every key sounding goes off (take the notes after).
@@ -205,20 +295,55 @@ impl KeyStrip {
     pub fn show(&mut self, ui: &mut Ui, cx: &UiCtx, panel: Rect, id: Id) {
         let m = cx.m;
         let rect = panel.with_min_y(panel.bottom() - m.u(KEYS_H));
-        // Middle C's white key in the middle, as the keyboard panel starts.
-        let white_w = KeyView::default().white_w;
-        let left = keyboard::slots(0..=59, None) + 0.5 - rect.width() / (2.0 * m.u(white_w));
+        let (keys_id, view_id) = (id.with("keys"), Id::new(VIEW));
+        // Middle C's white key in the middle at first, as the keyboard panel starts.
+        let view = ui.data(|d| d.get_temp(view_id)).unwrap_or(KeyView {
+            left: keyboard::slots(0..=59, None) + 0.5 - rect.width() / (2.0 * m.u(WHITE_W)),
+            white_w: WHITE_W,
+        });
+        let zone = Zone {
+            bar: rect,
+            strip: Rect::NOTHING,
+            knobs: Vec::new(),
+            scroll_left: rect.left(),
+        };
+        let grabbed = self.grab.track(ui, &zone, false, m);
+        // Two fingers zoom once they pinch.
+        let pinching = self.pinch(ui, keys_id, m);
+        let multi = ui.input(|i| i.multi_touch().is_some());
+        let zoom = grabbed.zoom.filter(|_| pinching || !multi);
         let piano = Piano {
             rect,
             two_rows: false,
-            view: KeyView { left, white_w },
+            view,
         };
+        let piano = Piano {
+            view: piano.moved(grabbed.scroll, zoom, m),
+            ..piano
+        };
+        ui.data_mut(|d| d.insert_temp(view_id, piano.view));
+        // A pan or a pinch plays nothing: its fingers let go of their keys until they lift.
+        if self.grab.scrolling() || pinching {
+            keyboard::let_go_at(ui.ctx(), keys_id);
+        }
         let input = KeyInput {
             enabled: true,
+            notes: self.lit.0,
+            sounding: self.lit.1,
+            // No glissando before a touch decides whether it pans.
+            hold: self.grab.calm(),
             ..KeyInput::default()
         };
-        let (ink, settings) = (self.ink, &self.settings);
-        let played = keyboard::keyboard_at(ui, id.with("keys"), piano, cx, ink, settings, input);
+        let theme = faint(cx.theme);
+        let panel_fill = cx.theme.colors.menu_fill.to_color32();
+        let ink = panel_fill.lerp_to_gamma(self.ink, HELD_MIX);
+        let cx = &UiCtx { theme: &theme, m };
+        let settings = &self.settings;
+        let played = keyboard::keyboard_at(ui, keys_id, piano, cx, ink, settings, input);
+        // A separator hairline along their top: on a light theme the white keys are about the panel's colour.
+        let line = rect.with_max_y(rect.top() + 1.0 / m.ppp());
+        ui.painter()
+            .rect_filled(line, 0.0, theme.colors.background.to_color32());
         let now = ui.input(|i| i.time);
         if !played.tapped.is_empty() {
             let gate = now + crate::app::TAP_GATE;
@@ -258,8 +383,6 @@ const WAVE_X: f32 = 2.0;
 const WAVE_MARGIN: f32 = 2.4;
 const WAVE_H: f32 = 1.0;
 const WAVE_ALPHA: f32 = 0.85;
-/// How long the waveform holds a peak, in seconds: the cycles of a low note fill in ([`envelope`]).
-const HOLD_S: f64 = 0.02;
 /// The waveform's top below the strip's, and the name's share of the label row (5 : 1).
 const WAVE_TOP: f32 = 0.125;
 const NAME_SHARE: f32 = 5.0 / 6.0;
@@ -269,6 +392,8 @@ const NAME_SHARE: f32 = 5.0 / 6.0;
 pub enum Play {
     /// Play the sample once from this frame.
     From(usize),
+    /// The sample playing goes on in the strip's, decoded further, from where it is; true: more still comes.
+    More(bool),
     Stop,
 }
 
@@ -277,6 +402,8 @@ pub struct SampleStrip {
     pub name: String,
     /// The decoded sample; `None` while it loads or when it does not decode: no play button, waveform or progress.
     pub wave: Option<Waveform>,
+    /// While the rest of the file decodes: about how many frames the whole has.
+    whole: Option<usize>,
     /// While it plays: when it started (egui seconds; `None` until its first frame) and from which frame.
     playing: Option<(Option<f64>, usize)>,
     /// A touch on the waveform: stopped until its release.
@@ -290,6 +417,7 @@ impl SampleStrip {
         let mut strip = Self {
             name,
             wave: None,
+            whole: None,
             playing: None,
             touching: None,
             plays: Vec::new(),
@@ -304,6 +432,30 @@ impl SampleStrip {
     fn play(&mut self, from: usize) {
         self.playing = Some((None, from));
         self.plays.push(Play::From(from));
+        if self.whole.is_some() {
+            self.plays.push(Play::More(true));
+        }
+    }
+
+    /// Its sample decoded further: `wave`, a longer start of the same file, with about `whole` frames still to come
+    /// (`None`: it is the whole). It plays on from where it is, the first from the start; `None` (the file does not
+    /// decode after all) stops it.
+    pub fn grow(&mut self, wave: Option<Waveform>, whole: Option<usize>) {
+        let Some(wave) = wave else {
+            self.stop();
+            (self.wave, self.whole) = (None, None);
+            return;
+        };
+        let (first, same) = match &self.wave {
+            None => (true, false),
+            Some(old) => (false, Arc::ptr_eq(&old.data, &wave.data)),
+        };
+        (self.wave, self.whole) = (Some(wave), whole);
+        if first {
+            self.play(0);
+        } else if !same && self.playing.is_some() {
+            self.plays.push(Play::More(whole.is_some()));
+        }
     }
 
     /// Stops it, if it plays (a refresh, a new pick, the picker closing).
@@ -377,16 +529,17 @@ impl SampleStrip {
             *since = Some(now);
         }
         let frames = wave.data.frames();
+        let whole = self.whole.map_or(frames, |w| w.max(frames));
         if self.position(now).is_some_and(|at| at >= frames as f64) {
-            // It ended: the player stopped by itself.
-            self.playing = None;
+            // It ended, the player stopped by itself; or while more comes, the player waits at the end of what is
+            // known, and so does the clock.
+            self.playing = self.whole.map(|_| (Some(now), frames));
         }
         if self.playing.is_some() {
             ui.ctx().request_repaint();
         }
 
         let button = ui.interact(play, id.with("sample play"), Sense::click());
-        draw_icon(&painter, play, IconId::Play, text, 1.0, m);
         // The play key plays or stops it too (`Play preview` / `Pause preview`), unless a text field has the keys.
         let key = !ui.ctx().wants_keyboard_input() && crate::keymap::pressed(ui.ctx(), "play");
         if button.clicked() || key {
@@ -395,6 +548,12 @@ impl SampleStrip {
                 false => self.play(0),
             }
         }
+        let icon = if self.playing.is_some() {
+            IconId::Stop
+        } else {
+            IconId::Play
+        };
+        draw_icon(&painter, play, icon, text, 1.0, m);
 
         let wave_id = id.with("sample wave");
         ui.interact(wave_rect, wave_id, Sense::click_and_drag());
@@ -407,22 +566,31 @@ impl SampleStrip {
                 Finger::Up(finger, pos) if self.touching == Some(finger) => {
                     self.touching = None;
                     let u = ((pos.x - wave_rect.left()) / wave_rect.width()).clamp(0.0, 1.0);
-                    let at = ((u * frames as f32) as usize).min(frames.saturating_sub(1));
+                    let at = ((u * whole as f32) as usize).min(frames.saturating_sub(1));
                     self.play(at);
                 }
                 _ => {}
             }
         }
 
+        // The playlist's audio clip waveform of the whole file: a frame a content beat (Honeydew change, #124).
         let ink = text.gamma_multiply(WAVE_ALPHA);
-        let px = 1.0 / m.ppp();
         let (x0, width) = pixel_columns(wave_rect, m);
-        let (centre, scale) = wave_rows(wave_rect, false)[0];
-        let mut mesh = Mesh::default();
-        for (i, h) in envelope(&wave, width).into_iter().enumerate() {
-            add_band_column(&mut mesh, x0 + i as f32 * px, h * scale, centre, px, ink);
+        let rows = wave_rows(wave_rect, wave.summary.len() > 1);
+        let all = Wave {
+            frames,
+            per_beat: 1.0,
+            reversed: false,
+        };
+        // The columns of what is known, at the whole's scale.
+        let per_px = whole as f64 / width.max(1) as f64;
+        let known = ((frames as f64 / per_px).ceil() as usize).min(width);
+        let span = ((0.0, per_px), (x0, known));
+        painter.add(wave_mesh(&wave, all, &rows, span, 1.0 / m.ppp(), ink));
+        if let Some(at) = self.position(now) {
+            let x = wave_rect.left() + wave_rect.width() * (at / whole.max(1) as f64) as f32;
+            crate::ui::timeline::playhead_line(&painter, wave_rect, x, cx);
         }
-        painter.add(mesh);
 
         let seconds = self.position(now).unwrap_or(0.0) / f64::from(wave.data.sample_rate);
         let label = clock(seconds);
@@ -435,74 +603,6 @@ impl SampleStrip {
             text,
             5,
         );
-    }
-}
-
-/// The sample strip's waveform over `width` columns (#108): each column's peak |x| over both channels ([`peaks`]), held
-/// [`HOLD_S`] after it, then averaged over as many columns ahead, as a share of the loudest; the strip draws ± that about
-/// its middle, one band with smoothed edges ([`add_band_column`]; a column under 1 px a 1 px line).
-pub fn envelope(wave: &Waveform, width: usize) -> Vec<f32> {
-    let fpp = wave.data.frames() as f64 / width.max(1) as f64;
-    let mut peak = vec![0f32; width];
-    for (samples, summary) in wave.channels() {
-        for (p, (lo, hi)) in peak
-            .iter_mut()
-            .zip(peaks(samples, summary, fpp, 0.0, width))
-        {
-            *p = p.max(lo.abs()).max(hi.abs());
-        }
-    }
-    // ponytail: O(width · hold), the hold at most width/50 columns; a running max if strips grow much wider.
-    let hold = (HOLD_S * f64::from(wave.data.sample_rate) / fpp).ceil() as usize;
-    let hold = hold.min(width / 50);
-    let held: Vec<f32> = (0..width)
-        .map(|i| {
-            peak[i.saturating_sub(hold)..=i]
-                .iter()
-                .fold(0f32, |a, &b| a.max(b))
-        })
-        .collect();
-    // The held peaks averaged over the next `hold` columns (into `peak`): the hold's flat steps become ramps from one
-    // crest to the next, and the two windows together look as far back as ahead.
-    let mut sum = 0f32;
-    for i in (0..width).rev() {
-        sum += held[i];
-        if let Some(gone) = held.get(i + hold + 1) {
-            sum -= gone;
-        }
-        peak[i] = (sum / (width - i).min(hold + 1) as f32).max(0.0);
-    }
-    let top = peak.iter().fold(0f32, |a, &b| a.max(b));
-    for p in &mut peak {
-        *p = if top > 0.0 { *p / top } else { 0.0 };
-    }
-    peak
-}
-
-/// Adds the strip's band column at `x` to `mesh`: `px` wide, ± `half` about `centre`. The rows its edges cut through
-/// get `ink` at the share they cover, so a gentle slope reads smooth, not as steps of whole device pixels; a band under
-/// a pixel tall is the audio editor's 1 px line ([`add_column`]).
-fn add_band_column(mesh: &mut Mesh, x: f32, half: f32, centre: f32, px: f32, ink: Color32) {
-    let (top, bottom) = ((centre - half) / px, (centre + half) / px);
-    // A row covered but for 2 % is whole: solid, not a cap the colour of `ink`.
-    let (inner_top, inner_bottom) = ((top - 0.02).ceil(), (bottom + 0.02).floor());
-    if inner_bottom <= inner_top {
-        add_column(mesh, x, (-half, half), (centre, 1.0), px, ink);
-        return;
-    }
-    let mut rows = |from: f32, to: f32, ink: Color32| {
-        let r = Rect::from_x_y_ranges(x..=x + px, from * px..=to * px);
-        mesh.add_colored_rect(r, ink);
-    };
-    rows(inner_top, inner_bottom, ink);
-    // The cut rows; a nearly bare one stays bare.
-    for (row, cover) in [
-        (inner_top - 1.0, inner_top - top),
-        (inner_bottom, bottom - inner_bottom),
-    ] {
-        if (0.02..0.98).contains(&cover) {
-            rows(row, row + 1.0, ink.gamma_multiply(cover));
-        }
     }
 }
 

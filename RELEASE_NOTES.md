@@ -1,16 +1,18 @@
-Honeydew 0.5.2 adds a keyboard to the preset browser, sample preview in SONGS, vibrato for the SoundFont Player and a draggable file browser scrollbar, and fixes the Generate window's dropdowns, its Chromatic chords and the DW Sampler's My Files.
+Honeydew 0.5.5 adds presets for plugin modules, ghost notes from a channel's other clips, a value bubble while you drag a control, library folders and an exit question on Android, and many fixes from the issue tracker.
 
-- Generate. Only one dropdown opens at a time and it always shows above the window. A tap outside or Back closes it, and the window stays on screen beside the rack (#107).
-- Generate. In the Chromatic scale it writes real major and minor chords in the key, each voiced close to the one before (#104).
-- Piano roll. The note menu has Transpose +1, -1, +12 and -12 (#102).
-- SoundFont Player. It plays a SoundFont's own vibrato, the mod wheel adds vibrato, new Vib Rate, Vib Depth and Vib Delay sliders add your own, and Quality High gives smoother playback (#102).
-- Pitcher. With F-Mode on it keeps the voice's formants, and F-Shift really moves them while the pitch stays (#106).
-- DW Sampler. Tapping its sample name opens My Files with all your folders, in My Samples or the folder of the sample it plays, and one tap loads a sample (#109).
-- Pickers. Folders end in an arrow and audio files in a waveform, and SoundFonts, SFZ and other files show their extension (#109).
-- SONGS. Tapping an audio file previews it on a strip under the list, and Send to playlist puts the selected files on new audio tracks at the playhead (#106).
-- Waveforms. Sample strips draw a smooth peak shape, and the Analyzer's scope draws a clean line (#108).
-- Preset browser. Instrument presets have a keyboard at the bottom to play the sound while you browse, and the instrument card has previous and next arrows beside the preset name (#98).
-- Collapsed tracks. The track menu can collapse or expand every track at once, and collapsed tracks are a little taller with their own On and Solo buttons (#100).
-- File browser. The scrollbar in the pickers and in SONGS can be grabbed and dragged to jump through long folders (#111).
-- Lemon plugins. A long press on a Lemon knob offers Create automation clip, which adds its automation track, and the plugins are up to date with Lemon Studio (#113, #112).
-- MIDI. Import MIDI Tracks opens Honeydew's own browser in My MIDI, and its Import button still brings in files from elsewhere (#113).
+- Rack. Copy, Paste and rack presets keep Honeydew's own modules and plugin modules, Clear Rack keeps a plugin instrument, and plugin modules can save and load presets of their own (#149).
+- Piano roll. Ghost notes show the channel's other tracks and clips, with a Ghosts switch in the snap menu, and their velocity and pan show in the graph lane. A long press on a ghost note opens its clip (#152, #154).
+- Piano roll view. Notes show their names, the channel's name sits under the ruler, and you can zoom out to a whole long clip or in to single 1/128 steps (#154, #171, #175).
+- Value bubble. Dragging a knob or slider shows its value in a bubble. Turn it off in Settings (#171).
+- Note effects. Changing a note effect such as Transpose no longer leaves notes hanging (#140).
+- Previews. A large audio file starts playing in the sample pickers and Songs while the rest of it loads (#131, #153).
+- Song archives. Archives over 512 MiB open, import and unzip. A song in an archive's unzipped folder finds the archive's samples, and project ZIPs now include samples loaded in the Lemon samplers and samples from library folders (#128, #157, #168, #144).
+- Android. Back closes the open panel first and then asks "Exit Honeydew?". Settings > Library folders adds folders from outside Honeydew to Songs and the pickers. Multi-core processing can be turned on in Settings and starts off (#147, #144, #145, #156).
+- Android audio. Level meters no longer disappear at small buffer sizes, a 4096-frame buffer size is available, and the screen redraws at most 60 times a second while playing, leaving more time for audio (#145, #172).
+- Recording. A new Input gain setting under Audio input, and Calibrate now works with quiet microphones in a noisy room (#129).
+- Mixer. The master track shows its live peak in dB, in red above 0 dB, and the meters fall faster (#143, #135).
+- Instruments. MiniSynth's slide starts fresh on each new note, a sample newly loaded into the DW Sampler plays at its own pitch on middle C, and the DW Sampler's Import opens .dwp and .sfz programs (#143, #102, #176).
+- Lemon plugins. Updated to the latest Lemon Studio, Tesla's Convert to score puts its notes in a new clip at the playhead, and the type-in box has an OK button (#164, #167, #166).
+- Drum editor. The Sample tab's waveform shows Sample Start and Stretch (#175).
+- Audio clips. A clip's sound stays in line with the playlist when you change its Speed, thanks to tw12992 (#173).
+- Save dialog. The estimated length follows tempo automation.

@@ -170,6 +170,10 @@ pub fn show(
     let mut ui = ui.new_child(UiBuilder::new().id(("rack", channel)).max_rect(rect));
     state.panel.covered = app.covered;
     state.panel.middle_c_is_c4 = app.middle_c_is_c4;
+    let place = app.settings.rack_tab_place;
+    state.panel.tab_y = crate::ui::main_screen::rack_tab_pill(&app.regions, place, app.cx.m)
+        .center()
+        .y;
     state.panel.lemon_full = state.full;
     // The input row's (an Audio Record channel's): the arm button with multitrack on, the meter while the input is open.
     state.panel.multitrack = app.settings.multitrack_recording;
@@ -263,10 +267,23 @@ pub fn show(
     if actions.replace_song || created.is_some() || rewrote {
         app.song_edited(true);
     }
-    if let Some(copy) = actions.copy {
+    // A copied plugin module, and a rack preset's, holds its plugin's state as it is now (#149).
+    if let Some(mut copy) = actions.copy {
+        crate::plugins::store_copy_states(channel_id, &mut copy);
         *clipboard = copy;
     }
-    if let Some(preset) = actions.preset {
+    if let Some(mut preset) = actions.preset {
+        use crate::project_files::PresetSource;
+        // Honeydew change (#149, 0.5.5): a module preset of a plugin module holds it too.
+        match &mut preset {
+            PresetSource::Rack { modules, .. } => {
+                crate::plugins::store_copy_states(channel_id, modules)
+            }
+            PresetSource::Module(module) => {
+                crate::plugins::store_copy_states(channel_id, std::slice::from_mut(module))
+            }
+            _ => {}
+        }
         app.files.ask_preset(preset, channel_id);
     }
     if let Some(target) = actions.picker {

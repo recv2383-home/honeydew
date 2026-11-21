@@ -835,10 +835,11 @@ mod audio {
     }
 
     #[test]
-    fn without_a_calibration_a_take_drops_the_engines_buffer_size_and_with_the_toggle_on_nothing() {
-        // L = the engine's audio buffer size, 256 frames here, while compensating (the toggle unset or OFF); nothing
-        // with the toggle ON.
-        for (toggle, dropped) in [(None, 256), (Some(false), 256), (Some(true), 0)] {
+    fn without_a_calibration_a_take_drops_the_engines_buffer_size_and_with_the_toggle_off_nothing()
+    {
+        // L = the engine's audio buffer size, 256 frames here, while compensating (the toggle ON, Honeydew change
+        // #129); nothing with the toggle OFF.
+        for (toggle, dropped) in [(true, 256), (false, 0)] {
             let mut a = AudioRig::new("buffer", false);
             a.rig.rec.0.borrow_mut().buffer_frames = 256;
             a.rig.app.settings.latency_compensation = toggle;
@@ -854,6 +855,29 @@ mod audio {
             let ends: Vec<_> = a.rig.app.main_screen.takes.iter().map(|t| t.end).collect();
             assert_eq!(ends, [BEAT as f64], "{toggle:?}");
         }
+    }
+
+    #[test]
+    fn the_input_gain_raises_the_input_before_it_records() {
+        // Honeydew change (#129): `Input gain` at +6 dB doubles what records (0.25 alone writes 8191).
+        let mut a = AudioRig::new("gain", false);
+        a.rig.app.settings.input_gain_db = 6.0;
+        a.rig.app.settings.count_in = false;
+        a.rig.frame(vec![]);
+        a.rig.click(PLAY);
+        a.feed(FRAMES_PER_BEAT, 0.25);
+        a.at(BEAT);
+        a.rig.click(PLAY);
+        let bytes = std::fs::read(a.user.join("My Recordings").join("Rec.wav")).unwrap();
+        let samples: Vec<i16> = (bytes[46..].as_chunks::<2>().0.iter())
+            .map(|b| i16::from_le_bytes(*b))
+            .collect();
+        assert!(!samples.is_empty());
+        assert!(
+            (samples.iter()).all(|&x| (f32::from(x) / 8191.0 - 2.0).abs() < 0.01),
+            "{:?}",
+            &samples[..4]
+        );
     }
 
     #[test]
@@ -1264,7 +1288,7 @@ fn notes_record_at_the_song_position_with_no_latency_compensation() {
     // buffer size moves it, though they move an audio take of the same pass earlier.
     let mut rig = note_rig(false, 5 * BEAT + 3);
     rig.app.latency = Some(480);
-    rig.app.settings.latency_compensation = None;
+    rig.app.settings.latency_compensation = true;
     rig.rec.0.borrow_mut().buffer_frames = 256;
     rig.click(REC);
     rig.click(PLAY);

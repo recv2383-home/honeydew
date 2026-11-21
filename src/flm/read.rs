@@ -426,6 +426,20 @@ impl Reader {
                     }
                     _ => self.unknown(&chunk, &mut song.file.unknown_chunks)?,
                 },
+                // PROJECT's tag fields (#139, `flm::write`): four `vstr32` texts, else kept as unknown.
+                b"HDTg" => {
+                    self.charge(chunk.payload.len(), &chunk.path)?;
+                    let mut r = chunk.reader();
+                    let mut field = || r.vstr32().ok().map(text);
+                    match [field(), field(), field(), field()] {
+                        [Some(album), Some(genre), Some(year), Some(comment)] => {
+                            let meta = &mut song.file.meta;
+                            (meta.album, meta.genre, meta.year, meta.comment) =
+                                (album, genre, year, comment);
+                        }
+                        _ => self.unknown(&chunk, &mut song.file.unknown_chunks)?,
+                    }
+                }
                 _ => self.unknown(&chunk, &mut song.file.unknown_chunks)?,
             }
         }
@@ -811,8 +825,13 @@ impl Reader {
                         self.charge(4 * values.len(), &child.path)?;
                         module.params = values;
                     } else {
+                        let saved = values.len();
                         for (param, value) in module.params.iter_mut().zip(values) {
                             *param = value;
+                        }
+                        // Half Time's Length moved to a param of its own (GitHub #122).
+                        if type_id == honeydew_audio::half_time::HALF_TIME {
+                            honeydew_audio::half_time::upgrade(&mut module.params, saved);
                         }
                     }
                 }
@@ -1328,15 +1347,14 @@ fn legacy_reverb_params(params: &mut [f32], legacy: &[f32]) {
     }
 }
 
-/// A sample path a file can hold: a shorthand into the content or user root.
-fn writable(path: &ContentPath) -> bool {
-    matches!(
-        path,
-        ContentPath::Shorthand {
-            root: ContentRoot::App | ContentRoot::User,
-            ..
-        }
-    )
+/// A sample path a file can hold: a shorthand into the content or user root, or (Honeydew change, #144) an absolute
+/// path, a library folder's file, which reads only while its folder is added
+/// ([`crate::project_files::ProjectFiles::resolve`]).
+pub(super) fn writable(path: &ContentPath) -> bool {
+    match path {
+        ContentPath::Shorthand { root, .. } => matches!(root, ContentRoot::App | ContentRoot::User),
+        ContentPath::Plain(path) => std::path::Path::new(path).is_absolute(),
+    }
 }
 
 /// The channel's lane order, kind, name and kit, once its rack and CHNL are read.

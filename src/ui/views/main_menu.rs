@@ -4,9 +4,10 @@
 //!   `Import` with a file the system's picker gives, and a song or archive row with that file's song, through
 //!   [`ProjectFiles::replace`] (which asks first when the song has unsaved changes). `Save` saves it (as `Ctrl+S`).
 //!   `Unzip` extracts the selected archive ([`ProjectFiles::unzip_archive`]) and leaves the song as it is.
-//! - PROJECT: the tempo steps are song edits; the title, author and link (META@520, @264, @777) are param edits with
-//!   no undo step and no rebuild. The title is the display title, not the file name (`Song::title`, HEAD@8), which
-//!   names the file a quick save writes. The times and the lock come from `META`.
+//! - PROJECT: the tempo steps are song edits; the title, author and link (META@520, @264, @777) and the tag fields
+//!   (#139, `HDTg`) are param edits with no undo step and no rebuild; `Write tags on export` is a setting. The title
+//!   is the display title, not the file name (`Song::title`, HEAD@8), which names the file a quick save writes. The
+//!   times and the lock come from `META`.
 //!   `Samplerate:` is the running audio output's (`AudioLink::sample_rate`), `-` without one; PR #87: its dropdown
 //!   sets the project's own rate (`Song::sample_rate`, a song edit), which the row then shows.
 //!   `Reset`, `Hide` and `Lock metadata forever` each ask once, then set the time spent to 0, the time spent to −1
@@ -41,11 +42,11 @@
 //! [`ProjectFiles::export_theme`]: crate::project_files::ProjectFiles::export_theme
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 
 use eframe::egui;
 
-use super::sample_picker::{self, Decoded};
+use super::sample_picker::{self, Decoding};
 use super::{AppCtx, MenuTab, Nav, Overlay, settings_tab};
 use crate::APP_NAME;
 use crate::audio_link::AudioLink;
@@ -80,7 +81,7 @@ pub struct State {
     /// The question asked, until its answer comes.
     asked: Option<&'static str>,
     /// SONGS' previewed file decoding on the worker (#106).
-    decoding: Option<(PathBuf, Receiver<Decoded>)>,
+    decoding: Option<(PathBuf, Decoding)>,
 }
 
 impl State {
@@ -108,13 +109,19 @@ impl State {
 
     /// A decode that landed goes to SONGS' strip; the strip's plays go to the preview player.
     fn preview(&mut self, ctx: &egui::Context, audio: &mut AudioLink) {
-        match self.decoding.as_ref().map(|(_, done)| done.try_recv()) {
+        // A big file plays its start while the rest decodes (#131, #153).
+        if let Some((path, decoding)) = &self.decoding
+            && let Some((wave, whole)) = decoding.part()
+        {
+            self.menu.songs_preview().decoded(path, Some(wave), whole);
+        }
+        match self.decoding.as_ref().map(|(_, decoding)| decoding.done()) {
             None => {}
             Some(Err(TryRecvError::Empty)) => ctx.request_repaint(),
             Some(done) => {
                 let (path, _) = self.decoding.take().expect("decoding");
                 let wave = done.ok().and_then(|d| d.wave);
-                self.menu.songs_preview().decoded(&path, wave);
+                self.menu.songs_preview().decoded(&path, wave, None);
             }
         }
         self.send_plays(audio);
@@ -167,6 +174,17 @@ pub fn sounds_question(why: Option<String>) -> Nav {
 /// `Exit <app>?` with `Yes` / `Cancel`, tagged [`QUIT_TAG`]. It never asks about unsaved changes.
 pub fn quit_question() -> Nav {
     message(QUIT_TAG, vec![format!("Exit {APP_NAME}?")], "Yes", "Cancel")
+}
+
+/// Android's Back with nothing open (Honeydew change, #147): `Exit <app>?` with `Exit` / `Cancel`, tagged
+/// [`QUIT_TAG`], so that `Exit` quits as the window's close does.
+pub fn exit_question() -> Nav {
+    message(
+        QUIT_TAG,
+        vec![format!("Exit {APP_NAME}?")],
+        "Exit",
+        "Cancel",
+    )
 }
 
 /// Draws the menu on `tab` on the right of the screen; its tab row switches `tab`.
@@ -233,6 +251,11 @@ pub fn show(
     info.title.clone_from(&meta.display_title);
     info.author.clone_from(&meta.author);
     info.link.clone_from(&meta.info_url);
+    info.album.clone_from(&meta.album);
+    info.genre.clone_from(&meta.genre);
+    info.year.clone_from(&meta.year);
+    info.comment.clone_from(&meta.comment);
+    info.write_tags = app.settings.write_tags;
     info.time_spent_secs = meta.editing_seconds;
     info.metadata_locked = meta.locked;
     info.started_on = meta_secs(&meta.created);
@@ -254,6 +277,10 @@ pub fn show(
     settings.content = app.files.content_dir();
     settings.plugins = cfg!(any(plugin_host, target_os = "ios"));
     settings.orientation = cfg!(target_os = "android");
+    #[cfg(target_os = "android")]
+    if *tab == MenuTab::Settings {
+        settings.library = Some(crate::android::all_files_access());
+    }
     state.menu.set_factory(app.files.factory);
     let action = state.menu.show(
         ui,
@@ -286,17 +313,27 @@ pub fn show(
         nav = Some(sounds_question(None));
     }
     plugin_folders(settings.take_plugin_action(), app.settings);
+    nav = nav.or(library_folders(settings.take_library_tap(), app));
     let action = action.or(answered);
     *tab = state.menu.tab;
 
-    // The display title, author and link are no undo steps (`Song::keep_unedited`) and the audio never reads them:
-    // param edits, with no rebuild, which set the song-changed flag.
+    // The display title, author, link and tag fields are no undo steps (`Song::keep_unedited`) and the audio never
+    // reads them: param edits, with no rebuild, which set the song-changed flag.
+    app.settings.write_tags = info.write_tags;
     let meta = &mut app.song.file.meta;
-    let typed = (&info.title, &info.author, &info.link);
-    if typed != (&meta.display_title, &meta.author, &meta.info_url) {
-        meta.display_title.clone_from(&info.title);
-        meta.author.clone_from(&info.author);
-        meta.info_url.clone_from(&info.link);
+    let fields = [
+        (&info.title, &mut meta.display_title),
+        (&info.author, &mut meta.author),
+        (&info.link, &mut meta.info_url),
+        (&info.album, &mut meta.album),
+        (&info.genre, &mut meta.genre),
+        (&info.year, &mut meta.year),
+        (&info.comment, &mut meta.comment),
+    ];
+    if fields.iter().any(|(typed, held)| *typed != &**held) {
+        for (typed, held) in fields {
+            held.clone_from(typed);
+        }
         app.param_edited();
     }
     state.preview(&ctx, app.audio);
@@ -391,6 +428,7 @@ pub fn show(
             crate::ui::file_drag::send(&ctx, files);
             return Some(Nav::Close);
         }
+        MainMenuAction::ClearPerformance => perf.clear_counters(),
     }
     nav
 }
@@ -480,6 +518,58 @@ fn plugin_folders(
         }
     };
     crate::plugins::rescan_folders(&settings.plugin_folders, all);
+}
+
+/// SETTINGS `Library folders` (Honeydew change, #144, #155, #165): what Android's tap and pick ask
+/// ([`library_pick`]), then the library folders follow the setting ([`library::set_library_folders`]).
+fn library_folders(tapped: bool, app: &mut AppCtx) -> Option<Nav> {
+    use crate::ui::main_menu::library;
+    let nav = library_pick(tapped, app);
+    library::set_library_folders(app.files.user_dir(), &app.settings.library_folders);
+    nav
+}
+
+/// Android's `Library folders` button: a tap asks for All files access until the app has it, then picks a folder to
+/// add (the system's folder picker), which joins the setting unless it is the user folder, in it or holding it (a
+/// message says so, as it does why a pick has no folder).
+#[cfg(target_os = "android")]
+fn library_pick(tapped: bool, app: &mut AppCtx) -> Option<Nav> {
+    use crate::android;
+    use crate::ui::main_menu::library::library_roots;
+    if tapped && android::all_files_access() {
+        android::pick_library_folder();
+    } else if tapped {
+        android::ask_all_files_access();
+    }
+    let message = |line: String| {
+        Some(Nav::Open(Overlay::Message {
+            tag: "main_menu_library",
+            lines: vec![line],
+            confirm: None,
+            extra: None,
+        }))
+    };
+    match android::take_library_folder()? {
+        Ok(path) if library_roots(app.files.user_dir(), std::slice::from_ref(&path)).is_empty() => {
+            message(format!(
+                "{path} is {}'s own folder, or holds it.",
+                crate::APP_NAME
+            ))
+        }
+        Ok(path) => {
+            if !app.settings.library_folders.contains(&path) {
+                app.settings.library_folders.push(path);
+            }
+            None
+        }
+        Err(err) => message(err),
+    }
+}
+
+/// Elsewhere the library folders are never added.
+#[cfg(not(target_os = "android"))]
+fn library_pick(_tapped: bool, _app: &mut AppCtx) -> Option<Nav> {
+    None
 }
 
 #[cfg(test)]

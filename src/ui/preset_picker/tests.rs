@@ -166,6 +166,28 @@ fn the_header_is_the_title_at_the_root_and_the_breadcrumb_in_a_folder() {
     assert_eq!(picker.header(), "     Reverb | My Files | Vocal");
 }
 
+/// Honeydew change (#144, #155, #165): `My Files` ends in the library folders added, after its own rows; one opens to
+/// its presets.
+#[test]
+fn my_files_ends_in_the_library_folders() {
+    let lib = library(&[
+        "My Racks/",
+        "My Racks/Zed/",
+        "My Racks/Bass.flmrack",
+        "/Phone/Racks/",
+        "/Phone/Racks/Lead.flmrack",
+        "/Phone/Racks/notes.txt",
+    ]);
+    crate::ui::main_menu::library::set_library_folders(None, &["/Phone/Racks".into()]);
+    let mut picker = PresetPicker::new(RACK_TITLE, Some("My Racks".into()), RACK_EXT, false);
+    open(&mut picker, &lib, MY_FILES);
+    assert_eq!(names(&picker, ""), ["Zed", "Bass", "Racks"]);
+    assert_eq!(names(&picker, "ac"), ["Racks"]);
+    open(&mut picker, &lib, "Racks");
+    assert_eq!(names(&picker, ""), ["Lead"]);
+    assert!(picker.in_library_folder());
+}
+
 #[test]
 fn a_my_files_folder_that_does_not_exist_yet_lists_as_empty() {
     let lib = library(&[]);
@@ -743,10 +765,11 @@ fn a_dw_programs_sample_folder_is_left_out() {
     assert_eq!(names(&picker, ""), ["Other", "Gen Guitar"]);
 }
 
-/// A Honeydew addition (#109): a folder, an audio file and any other file each carry their mark at the row's end; the
-/// picker's own preset files, every plain row of a preset list, carry none.
+/// A Honeydew addition (#109, #123): a folder and any other file each carry their mark at the row's end; the picker's
+/// own preset files, every plain row of a preset list, carry none. An audio file's is its extension too, even in the
+/// sample picker, whose own files they are.
 #[test]
-fn rows_mark_folders_audio_files_and_other_files_by_extension() {
+fn rows_mark_folders_and_files_by_extension() {
     use crate::ui::search_bar::Mark;
     let lib = library(&[
         "Mine/",
@@ -772,11 +795,14 @@ fn rows_mark_folders_audio_files_and_other_files_by_extension() {
         [
             Some(Mark::Folder),
             Some(Mark::Ext("sfz")),
-            Some(Mark::Audio),
+            Some(Mark::Ext("wav")),
             None,
             Some(Mark::Ext("sf2")),
         ]
     );
+    let rows = picker.rows("");
+    let kick = rows.iter().find(|i| i.name() == "Kick").unwrap();
+    assert_eq!(kick.mark("wav"), Some(Mark::Ext("wav")));
 }
 
 #[test]

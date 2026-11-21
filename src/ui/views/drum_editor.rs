@@ -307,8 +307,7 @@ pub fn show(state: &mut State, ui: &mut egui::Ui, app: &mut AppCtx, channel: usi
         (g.mixer_w, g.fold.c, g.row_band(), g.graph)
     };
     let (screen, shift) = (app.regions.screen.right(), app.settings.editor_ribbon_shift);
-    let strip_left = editor.left() + m.u(step_seq::HEADER_W);
-    let room = crate::ui::split::ribbon_room(editor.right(), screen, shift, strip_left, m);
+    let room = crate::ui::split::ribbon_room(editor, screen, shift, m);
     if let Some(tabs) = tabs(editor, c, m, room) {
         let mut page = StripPage::ALL
             .iter()
@@ -358,7 +357,8 @@ pub fn show(state: &mut State, ui: &mut egui::Ui, app: &mut AppCtx, channel: usi
                     && let Some(wave) = app.audio.samples.waveform(slot, &read)
                 {
                     let painter = ui.painter_at(spacer);
-                    graph_lane::spacer_wave(&painter, spacer, &wave, slot.file.reverse, color, m);
+                    let colors = &app.cx.theme.colors;
+                    graph_lane::spacer_wave(&painter, spacer, (&wave, slot), (color, colors), m);
                 }
             }
         }

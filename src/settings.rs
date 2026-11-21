@@ -140,8 +140,9 @@ pub struct Settings {
     /// is not connected: the choice reconnects when the device returns.
     #[serde(rename = "MidiDevice")]
     pub midi_device: String,
-    /// `Multi core processing`: parallel independent desktop channel racks.
-    #[serde(rename = "multithreaded")]
+    /// `Multi core processing`: parallel independent channel racks, on the desktop and (a Honeydew change, #145, #156)
+    /// Android. Our own key: the older `multithreaded` moves here once, off on Android ([`migrate_keys`]).
+    #[serde(rename = "multiCore")]
     pub multi_core: bool,
     #[serde(rename = "mcpEnabled")]
     pub mcp_enabled: bool,
@@ -158,11 +159,11 @@ pub struct Settings {
     /// `Sound mode:`, a stored id from [`SOUND_MODES`], selecting the platform's audio mode.
     #[serde(rename = "soundModeAndr")]
     pub sound_mode: u8,
-    /// `Enable audio recording latency compensation`: the toggle as stored, `None` while unset. Its meaning is
-    /// inverted: compensation is on exactly when the toggle is OFF, and an unset key shows the toggle ON but
-    /// compensates ([`crate::recording::recorder::compensates`]).
-    #[serde(rename = "reclatency")]
-    pub latency_compensation: Option<bool>,
+    /// `Enable audio recording latency compensation` (our own key): ON compensates. Honeydew change (#129, #130): the
+    /// earlier `reclatency` toggle compensated while OFF or unset; a load moves it here once, keeping whether it
+    /// compensated ([`migrate_keys`]). On by default, as the earlier unset key compensated.
+    #[serde(rename = "recLatencyCompensation")]
+    pub latency_compensation: bool,
     /// `Enable multitrack recording`. Stored only.
     #[serde(rename = "multitrackrec")]
     pub multitrack_recording: bool,
@@ -333,9 +334,8 @@ pub struct Settings {
     /// drag keeps it inside the editor's band ([`crate::ui::split::ribbon`]).
     #[serde(rename = "editorRibbonShift")]
     pub editor_ribbon_shift: f32,
-    /// The channel rack's edge tab's place (our own key; PR #87): the offset a drag gave it, in U down the screen's
-    /// right edge from where it opens, kept over restarts. 0 by default; the drag keeps the tab inside the content
-    /// area ([`crate::ui::main_screen::MainScreen::corner_buttons`]).
+    /// The channel rack's edge tab's old place (our own key; PR #87), in U from its old home. Unused since 0.5.3
+    /// ([`Self::rack_tab_place`] replaces it, not converted); kept so the key still reads.
     #[serde(rename = "rackTabShift")]
     pub rack_tab_shift: f32,
     /// The editors' graph-lane tab's place (our own key; PR #87): the sideways offset a drag gave it, in U from where
@@ -344,7 +344,35 @@ pub struct Settings {
     /// ([`crate::ui::graph_lane::GraphLane::tab_below`]).
     #[serde(rename = "graphTabShift")]
     pub graph_tab_shift: f32,
+    /// `Keyboard in pickers` (our own key, after #98): an instrument's preset and sample pickers have the keys
+    /// at their bottom ([`crate::ui::picker_preview::KeyStrip`]). On by default; off, the list takes their room.
+    #[serde(rename = "pickerKeys")]
+    pub picker_keys: bool,
+    /// The channel rack's edge tab's place (our own key, 0.5.3): where a drag left it, as a share of the
+    /// space the content area leaves it down the screen's right edge, 0 at the top, 1 at the bottom, kept over restarts
+    /// and resizes. 0.5 (centred) by default ([`crate::ui::rack::rack_tab`]).
+    #[serde(rename = "rackTabPlace")]
+    pub rack_tab_place: f32,
+    /// PROJECT's `Write tags on export` (our own key; #139): an audio render writes the song's title, author and other
+    /// tag fields into the file ([`crate::project_files::export::tags`]). On by default.
+    #[serde(rename = "writeTagsOnExport")]
+    pub write_tags: bool,
+    /// `Input gain` (our own key; Honeydew change, #129), in dB within [`INPUT_GAIN_DB`]: the audio input is raised or
+    /// lowered by it before monitoring, recording and `Calibrate` hear it. 0 by default.
+    #[serde(rename = "recInputGainDb")]
+    pub input_gain_db: f32,
+    /// `Show value while dragging` (our own key; Honeydew change, #171): a dragged knob or slider shows its value in a
+    /// bubble by the finger or pointer (`ui::widgets::set_value_bubble`). On by default.
+    #[serde(rename = "showValueWhileDragging")]
+    pub value_bubble: bool,
+    /// SETTINGS `Library folders` (our own key; Honeydew change, #144, #155, #165; Android only): the folders the
+    /// user added to the library, by path, in the order added ([`crate::ui::main_menu::library::library_folders`]).
+    #[serde(rename = "libraryFolders")]
+    pub library_folders: Vec<String>,
 }
+
+/// `Input gain`'s range in dB.
+pub const INPUT_GAIN_DB: std::ops::RangeInclusive<f32> = -12.0..=24.0;
 
 /// `Project version size limit:`'s items, in MB.
 pub const VERSION_SIZE_LIMITS: [u32; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
@@ -368,7 +396,7 @@ impl Default for Settings {
             low_latency: 0,
             background_audio: false,
             sound_mode: DEFAULT_SOUND_MODE,
-            latency_compensation: None,
+            latency_compensation: true,
             multitrack_recording: false,
             count_in: true,
             rec_metronome: true,
@@ -419,6 +447,12 @@ impl Default for Settings {
             editor_ribbon_shift: 0.0,
             rack_tab_shift: 0.0,
             graph_tab_shift: 0.0,
+            picker_keys: true,
+            rack_tab_place: 0.5,
+            write_tags: true,
+            input_gain_db: 0.0,
+            value_bubble: true,
+            library_folders: Vec::new(),
         }
     }
 }
@@ -448,7 +482,7 @@ impl Settings {
                 fields.remove("uiscalefactor");
             }
         }
-        migrate_keys(&mut fields);
+        migrate_keys(&mut fields, cfg!(target_os = "android"));
         // Older versions stored this setting as a boolean toggle. Preserve an enabled toggle as the
         // smallest target when loading those settings into the buffer-size slider.
         if let Some(enabled) = fields.get("lowlatency").and_then(Value::as_bool) {
@@ -477,6 +511,9 @@ impl Settings {
         }
         if !(0.0..=1.0).contains(&s.metronome_level) {
             s.metronome_level = d.metronome_level;
+        }
+        if !(0.0..=1.0).contains(&s.rack_tab_place) {
+            s.rack_tab_place = d.rack_tab_place;
         }
         // A a height must be a size, which the panel then keeps within its range.
         for (h, default) in [
@@ -521,6 +558,9 @@ impl Settings {
         }
         if !VERSION_SIZE_LIMITS.contains(&s.version_size_limit) {
             s.version_size_limit = d.version_size_limit;
+        }
+        if !INPUT_GAIN_DB.contains(&s.input_gain_db) {
+            s.input_gain_db = d.input_gain_db;
         }
         s
     }
@@ -572,7 +612,7 @@ pub const DEMO_SONGS_VERSION: i32 = 2;
 /// Moves the values of the preference keys that newer ones replaced to those, where they hold nothing yet: the panel
 /// heights move to the `…Cells` keys (ours were in U already), and `demoSongsRestored` becomes the current demo-song
 /// set. The former keys are read no more and go with the next save.
-fn migrate_keys(fields: &mut Map<String, Value>) {
+fn migrate_keys(fields: &mut Map<String, Value>, android: bool) {
     for (old, new) in [
         ("preferredKbdSize", "preferredKbdSizeCells"),
         ("recentKbdSize", "recentKbdSizeCells"),
@@ -587,6 +627,22 @@ fn migrate_keys(fields: &mut Map<String, Value>) {
         && !fields.contains_key("demoSongsVersion")
     {
         fields.insert("demoSongsVersion".into(), DEMO_SONGS_VERSION.into());
+    }
+    // Honeydew change (#129, #130): the earlier inverted latency toggle, which compensated unless TRUE, becomes the
+    // ON-compensates one, compensation kept.
+    if let Some(toggle) = fields.remove("reclatency")
+        && !fields.contains_key("recLatencyCompensation")
+    {
+        let compensates = toggle != Value::Bool(true);
+        fields.insert("recLatencyCompensation".into(), compensates.into());
+    }
+    // Honeydew change (#145, #156): `multithreaded` did nothing on Android before 0.5.5; there an On saved then loads
+    // off once, so nobody lands in the experimental multi-core racks unknowingly. The desktop keeps its choice.
+    if let Some(on) = fields.remove("multithreaded")
+        && !fields.contains_key("multiCore")
+    {
+        let kept = on == Value::Bool(true) && !android;
+        fields.insert("multiCore".into(), kept.into());
     }
 }
 
@@ -810,7 +866,7 @@ mod tests {
                 .get(1)
                 .map(|&(id, _)| id)
                 .unwrap_or(d.sound_mode),
-            latency_compensation: Some(false),
+            latency_compensation: !d.latency_compensation,
             multitrack_recording: !d.multitrack_recording,
             count_in: !d.count_in,
             rec_metronome: !d.rec_metronome,
@@ -873,6 +929,12 @@ mod tests {
             editor_ribbon_shift: -1.5,
             rack_tab_shift: 2.25,
             graph_tab_shift: -3.5,
+            picker_keys: !d.picker_keys,
+            rack_tab_place: 0.25,
+            write_tags: !d.write_tags,
+            input_gain_db: 6.5,
+            value_bubble: !d.value_bubble,
+            library_folders: vec!["/storage/emulated/0/Music".into()],
         }
     }
 
@@ -883,8 +945,9 @@ mod tests {
         assert!(
             d.ghost_notes && d.range_labels && d.hardware_meters && d.count_in && d.rec_metronome
         );
-        // The latency toggle is unset: shown ON, and it compensates.
-        assert_eq!(d.latency_compensation, None);
+        assert!(d.picker_keys);
+        // The latency toggle is ON: it compensates.
+        assert!(d.latency_compensation);
         // The other toggles are off.
         assert!(!d.multi_core && d.low_latency == 0 && !d.background_audio);
         assert!(!d.multitrack_recording);
@@ -936,20 +999,56 @@ mod tests {
         assert_eq!(Settings::load(&stored("[1, 2]")), Settings::default());
     }
 
+    /// Honeydew change (#129, #130): the latency toggle is ON while it compensates. The earlier inverted `reclatency`
+    /// (compensating while FALSE or unset) moves to its own key once, compensation kept: shown ON where it ran.
     #[test]
-    fn the_latency_toggle_stores_true_or_false_and_reads_unset_as_none() {
-        // The stored TRUE/FALSE, and no key at all for a fresh install.
+    fn the_inverted_latency_toggle_moves_once_and_keeps_whether_it_compensates() {
         for (json, want) in [
-            (r#"{"reclatency": true}"#, Some(true)),
-            (r#"{"reclatency": false}"#, Some(false)),
-            ("{}", None),
+            (r#"{"reclatency": true}"#, false),
+            (r#"{"reclatency": false}"#, true),
+            ("{}", true),
+            (r#"{"recLatencyCompensation": false}"#, false),
+            // Moved already: the old key, left by an older version, changes nothing.
+            (
+                r#"{"recLatencyCompensation": true, "reclatency": true}"#,
+                true,
+            ),
         ] {
             let s = Settings::load(&stored(json));
             assert_eq!(s.latency_compensation, want, "{json}");
             let mut mem = Mem::default();
             s.save(&mut mem);
+            let saved = mem.0.get(STORAGE_KEY).cloned().unwrap_or_default();
+            assert!(!saved.contains("\"reclatency\""), "{saved}");
             assert_eq!(Settings::load(&mem).latency_compensation, want, "{json}");
         }
+    }
+
+    /// Honeydew change (#145, #156): `multithreaded` did nothing on Android before 0.5.5, so an On saved there must not
+    /// switch the experimental multi-core racks on unknowingly. It moves to `multiCore` once: off on Android, kept on
+    /// the desktop.
+    #[test]
+    fn a_saved_multi_core_moves_once_and_starts_off_on_android() {
+        for (json, android, want) in [
+            (r#"{"multithreaded": true}"#, true, Some(false)),
+            (r#"{"multithreaded": true}"#, false, Some(true)),
+            (r#"{"multithreaded": false}"#, false, Some(false)),
+            ("{}", true, None),
+            // Moved already: the choice since stays, whatever an older version left.
+            (
+                r#"{"multiCore": true, "multithreaded": false}"#,
+                true,
+                Some(true),
+            ),
+        ] {
+            let mut fields: Map<String, Value> = serde_json::from_str(json).unwrap();
+            migrate_keys(&mut fields, android);
+            let got = fields.get("multiCore").and_then(Value::as_bool);
+            assert_eq!(got, want, "{json} on Android {android}");
+            assert!(!fields.contains_key("multithreaded"), "{json}");
+        }
+        let s = Settings::load(&stored(r#"{"multithreaded": true}"#));
+        assert_eq!(s.multi_core, !cfg!(target_os = "android"));
     }
 
     #[test]
@@ -981,7 +1080,7 @@ mod tests {
     #[test]
     fn out_of_range_values_load_as_defaults() {
         let s = Settings::load(&stored(
-            r#"{"theme": 9, "uiscale": 9, "soundModeAndr": 4, "mtmlevel": 1.5, "ghostnotes": false}"#,
+            r#"{"theme": 9, "uiscale": 9, "soundModeAndr": 4, "mtmlevel": 1.5, "recInputGainDb": 30, "ghostnotes": false}"#,
         ));
         assert_eq!(
             s,
@@ -1089,6 +1188,7 @@ mod tests {
                 "keyboardKind",
                 "lastAudioFileFormat",
                 "lastSong",
+                "libraryFolders",
                 "lockpads",
                 "lowlatency",
                 "mcpEnabled",
@@ -1096,19 +1196,22 @@ mod tests {
                 "middlec4",
                 "midiApplyNoteEffects",
                 "mtmlevel",
-                "multithreaded",
+                "multiCore",
                 "multitrackrec",
                 "performanceOverlay",
                 "pianoRollPanSnap",
                 "pianoRollVelocitySnap",
+                "pickerKeys",
                 "pluginFolders",
                 "preferredKbdSizeCells",
                 "projectVersionSizeLimit",
+                "rackTabPlace",
                 "rackTabShift",
+                "recInputGainDb",
+                "recLatencyCompensation",
                 "recMetronome",
                 "reccount",
                 "recentKbdSizeCells",
-                "reclatency",
                 "sampleMemoryLimit",
                 "screenOrientation",
                 "showHardwareMeters",
@@ -1116,13 +1219,15 @@ mod tests {
                 "showKeyNames",
                 "showRangeIndexLabels",
                 "showTwoRows",
+                "showValueWhileDragging",
                 "showWheels",
                 "soundModeAndr",
                 "soundsNoticeSeen",
                 "soundsOverMobileData",
                 "theme",
                 "uiscalefactor",
-                "whatsNewSeen"
+                "whatsNewSeen",
+                "writeTagsOnExport"
             ]
         );
     }
